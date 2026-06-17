@@ -30,18 +30,54 @@ import {
   LayoutDashboard, Library, Layers, ListMusic, Download, Music2, Play, Pause,
   Plus, Trash2, Copy, GripVertical, Pencil, Check, X, ChevronDown, Disc3,
   Sparkles, Clock, FileJson, Printer, ArrowLeft, Upload, FolderUp, Mic2,
-  HardDrive, Link2Off, FileText, Cloud, Users, RefreshCw, AlertTriangle
+  HardDrive, Link2Off, FileText, Cloud, RefreshCw, AlertTriangle
 } from 'lucide-react';
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import {
+  getFirestore, doc, getDoc, setDoc, onSnapshot
+} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+import {
+  getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject
+} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js';
 
 
 /* =========================================================================
-   MOCK DATA
+   LIBRERIA PRECARICATA (beat e canzoni "ufficiali", visibili a tutti)
+   -------------------------------------------------------------------------
+   Qui puoi aggiungere i TUOI beat/canzoni in modo che siano sempre
+   disponibili e ascoltabili da chiunque apra il sito — anche senza piano
+   Blaze/Storage, perché il file audio non passa da Firebase: resta un
+   semplice file statico dentro al tuo repository GitHub, esattamente come
+   index.html.
+
+   COME AGGIUNGERE UN BEAT O UNA CANZONE:
+   1) Crea (se non esiste già) una cartella "beats" e/o "songs" nel tuo
+      repository, accanto a index.html, e caricaci dentro il file mp3
+      (es. tramite "Add file" > "Upload files" su GitHub).
+   2) Aggiungi qui sotto una riga con i suoi dati, copiando lo schema
+      dell'esempio commentato. Il campo audioUrl è il percorso relativo del
+      file che hai appena caricato.
+   3) Fai commit/push: dopo il prossimo aggiornamento del sito, quel beat/
+      canzone compare in libreria per tutti, audio incluso.
+
+   Chi apre il sito potrà comunque scegliere/associare questi beat e
+   canzoni ai propri brani, rinominarli (per la propria copia), scrivere
+   testi e note: tutto questo si sincronizza per tutti tramite Firestore.
+   Solo l'AGGIUNTA di nuovo audio passa da qui (cioè da te, editando il
+   codice) — è l'unica parte che il piano gratuito non rende "live" da
+   dentro al sito stesso.
+
+   Esempio (rimuovi le // per attivarlo, dopo aver caricato il file):
+   { id: 'beat1', name: 'Nome del beat', bpm: 140, key: 'C minor',
+     duration: 178, genre: 'trap', mood: 'dark', tags: ['trap', 'dark'],
+     notes: '', audioUrl: 'beats/nome-del-beat.mp3' },
    ========================================================================= */
 
 const MOCK_BEATS = [
 ];
 
-const MOCK_SONGS = [];
+const MOCK_SONGS = [
+];
 
 const GENRE_COLORS = {
   trap: 'bg-violet-500/20 text-violet-300 border-violet-500/40',
@@ -145,29 +181,58 @@ function moveItem(arr, from, to) {
 const MOOD_OPTIONS = ['dark', 'energetic', 'chill', 'happy', 'aggressive', 'romantic', 'nostalgic', 'uplifting'];
 
 /* =========================================================================
+   ⚙️ CONFIGURAZIONE FIREBASE
+   Per far funzionare il salvataggio condiviso (così tu e i tuoi amici
+   vedete sempre lo stesso progetto, da qualsiasi dispositivo), incolla qui
+   sotto la configurazione del tuo progetto Firebase gratuito.
+   Vedi le istruzioni passo passo in fondo alla risposta di Claude.
+   Se lasci questo oggetto vuoto, l'app funziona comunque, ma salva solo
+   nel browser di chi la usa (nessuna condivisione tra persone/dispositivi).
+   ========================================================================= */
+const firebaseConfig = {
+  apiKey: "AIzaSyC_9EvNttoY07Mxd9pWbkD6bxH1kmXnWW8",
+  authDomain: "epskyla.firebaseapp.com",
+  projectId: "epskyla",
+  storageBucket: "epskyla.firebasestorage.app",
+  messagingSenderId: "924475600896",
+  appId: "1:924475600896:web:da5562a40f53ed060668e5",
+};
+
+const firebaseEnabled = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId);
+let fbApp = null, db = null, storage = null;
+if (firebaseEnabled) {
+  try {
+    fbApp = initializeApp(firebaseConfig);
+    db = getFirestore(fbApp);
+    storage = getStorage(fbApp);
+  } catch (err) {
+    console.warn('Inizializzazione Firebase non riuscita, uso solo il salvataggio locale:', err);
+  }
+}
+const cloudReady = Boolean(db && storage);
+
+// One shared document holds the whole project. Everyone who opens this
+// site (with the same Firebase config) reads/writes the same document.
+const PROJECT_DOC_PATH = ['projects', 'ep-shared'];
+
+/* =========================================================================
    PERSISTENCE
    Two layers:
    1) PROJECT DATA (EP title, tracks, structure, lyrics, notes, beat/song
-      metadata) -> if this file is opened as a Claude artifact, window.storage
-      is available and we use shared:true keys so that everyone who opens
-      the same shared artifact sees and can edit the same project. If
-      window.storage isn't available (e.g. the file was downloaded and
-      opened directly in a browser), we fall back to this browser's
-      IndexedDB, exactly like before — local-only, but still durable
-      across refreshes.
-   2) AUDIO FILES (the actual uploaded mp3/wav bytes) are ALWAYS kept in
-      this browser's IndexedDB only. Shared cloud storage for artifacts is
-      text/JSON-only with a 5MB-per-key cap, so multi-megabyte audio files
-      can't be synced through it. Each collaborator keeps their own local
-      copy of whatever audio they uploaded or attached.
+      metadata) -> if Firebase is configured, this is saved to and synced
+      live from Cloud Firestore, so it's shared across everyone and every
+      device. If Firebase isn't configured, it falls back to this
+      browser's IndexedDB — local-only, but still durable across refreshes.
+   2) AUDIO FILES (the actual uploaded mp3/wav bytes) -> if Firebase is
+      configured, they're uploaded to Firebase Storage and referenced by a
+      normal https:// URL stored in the project data, so every
+      collaborator can actually hear them. Without Firebase, audio stays
+      in this browser's IndexedDB only (not shared).
    ========================================================================= */
 
 const DB_NAME = 'ep_music_builder_db';
 const DB_VERSION = 1;
 const META_KEY = 'project_v1';
-const SHARED_PROJECT_KEY = 'ep_project_shared_v1';
-
-const hasSharedStorage = typeof window !== 'undefined' && !!window.storage;
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -177,9 +242,9 @@ function openDB() {
     }
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
-      if (!db.objectStoreNames.contains('audio')) db.createObjectStore('audio');
+      const idb = req.result;
+      if (!idb.objectStoreNames.contains('meta')) idb.createObjectStore('meta');
+      if (!idb.objectStoreNames.contains('audio')) idb.createObjectStore('audio');
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -187,9 +252,9 @@ function openDB() {
 }
 
 async function idbGet(storeName, key) {
-  const db = await openDB();
+  const idb = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readonly');
+    const tx = idb.transaction(storeName, 'readonly');
     const req = tx.objectStore(storeName).get(key);
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -197,9 +262,9 @@ async function idbGet(storeName, key) {
 }
 
 async function idbSet(storeName, key, value) {
-  const db = await openDB();
+  const idb = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readwrite');
+    const tx = idb.transaction(storeName, 'readwrite');
     tx.objectStore(storeName).put(value, key);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -207,9 +272,9 @@ async function idbSet(storeName, key, value) {
 }
 
 async function idbDelete(storeName, key) {
-  const db = await openDB();
+  const idb = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readwrite');
+    const tx = idb.transaction(storeName, 'readwrite');
     tx.objectStore(storeName).delete(key);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
@@ -218,27 +283,82 @@ async function idbDelete(storeName, key) {
 
 // Save the project's text/JSON data using whichever backend is available.
 async function saveProjectData(data) {
-  if (hasSharedStorage) {
-    await window.storage.set(SHARED_PROJECT_KEY, JSON.stringify(data), true);
-    return 'shared';
+  if (cloudReady) {
+    await setDoc(doc(db, ...PROJECT_DOC_PATH), data);
+    return 'cloud';
   }
   await idbSet('meta', META_KEY, data);
   return 'local';
 }
 
 async function loadProjectData() {
-  if (hasSharedStorage) {
-    const res = await window.storage.get(SHARED_PROJECT_KEY, true);
-    return res ? JSON.parse(res.value) : null;
+  if (cloudReady) {
+    const snap = await getDoc(doc(db, ...PROJECT_DOC_PATH));
+    return snap.exists() ? snap.data() : null;
   }
   return idbGet('meta', META_KEY);
 }
 
-// strip in-memory-only fields (object URLs become invalid after reload, and
-// are never sent to shared storage anyway since they're local blob: URLs)
-function stripAudioUrl(item) {
-  const { audioUrl, ...rest } = item;
-  return rest;
+// Live subscription to the shared project (Firebase only). Calls back
+// every time the document changes — including the very first read, and
+// every time any collaborator saves.
+function subscribeToProjectData(onData, onError) {
+  if (!cloudReady) return () => {};
+  return onSnapshot(
+    doc(db, ...PROJECT_DOC_PATH),
+    (snap) => onData(snap.exists() ? snap.data() : null, snap.metadata.hasPendingWrites),
+    (err) => onError && onError(err)
+  );
+}
+
+// Upload an audio file to Firebase Storage and return its public URL.
+async function uploadAudioToCloud(kind, id, file) {
+  const fileRef = storageRef(storage, `${kind}/${id}`);
+  await uploadBytes(fileRef, file);
+  return getDownloadURL(fileRef);
+}
+
+async function deleteAudioFromCloud(kind, id) {
+  if (!cloudReady) return;
+  try {
+    await deleteObject(storageRef(storage, `${kind}/${id}`));
+  } catch {
+    // ignore — file may not exist, that's fine
+  }
+}
+
+// Strip fields that should never be persisted as-is: blob: URLs only make
+// sense in the tab that created them. Real https:// URLs (Firebase
+// Storage) are kept, since they're valid for everyone, everywhere.
+function sanitizeForSave(item) {
+  if (item.audioUrl && item.audioUrl.startsWith('blob:')) {
+    const { audioUrl, ...rest } = item;
+    return rest;
+  }
+  return item;
+}
+
+// Same idea, but for the {id: patch} override maps used for edits made to
+// PRELOADED beats/songs.
+function sanitizeOverridesForSave(overrides) {
+  const result = {};
+  for (const [id, patch] of Object.entries(overrides || {})) {
+    result[id] = sanitizeForSave(patch);
+  }
+  return result;
+}
+
+// Resolve a saved beat/song's audio: cloud URLs are used as-is (work for
+// everyone); anything else falls back to whatever this browser has
+// stored locally for that id.
+async function resolveAudioUrl(item, kind) {
+  if (item.audioUrl && /^https?:\/\//.test(item.audioUrl)) return item.audioUrl;
+  try {
+    const blob = await idbGet('audio', kind + '_' + item.id);
+    return blob ? URL.createObjectURL(blob) : null;
+  } catch {
+    return null;
+  }
 }
 
 /* =========================================================================
@@ -571,11 +691,11 @@ function TopBar({ epTitle, setEpTitle, progress, lastSaved, saveError, storageMo
           <ProgressBar value={progress} />
         </div>
 
-        {storageMode === 'shared' && (
+        {storageMode === 'cloud' && (
           <button
             onClick={onSync}
             disabled={syncing}
-            title="Controlla se i tuoi collaboratori hanno salvato nuove modifiche"
+            title="Forza un controllo di sincronizzazione con il cloud"
             className="w-8 h-8 rounded-lg border border-zinc-700 hover:border-violet-400 text-zinc-400 hover:text-violet-300 flex items-center justify-center transition-colors disabled:opacity-50 shrink-0"
           >
             <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
@@ -587,15 +707,15 @@ function TopBar({ epTitle, setEpTitle, progress, lastSaved, saveError, storageMo
             <span className="w-1.5 h-1.5 rounded-full bg-red-400 mr-1.5" />
             Salvataggio non riuscito
           </Pill>
-        ) : storageMode === 'shared' ? (
-          <Pill className="bg-violet-500/15 text-violet-300 border-violet-500/40 whitespace-nowrap" title="Le modifiche al progetto (testi, struttura, beat/canzoni collegati) sono condivise: chiunque apra questo stesso artifact le vede e può modificarle. I file audio caricati restano invece solo su questo dispositivo.">
-            <Users size={11} className="mr-1.5" />
-            Condiviso · salvato {lastSaved}
+        ) : storageMode === 'cloud' ? (
+          <Pill className="bg-violet-500/15 text-violet-300 border-violet-500/40 whitespace-nowrap" title="Il progetto (testi, struttura, beat/canzoni, audio) è salvato online: tu e i tuoi amici vedete sempre la stessa versione, su qualsiasi dispositivo.">
+            <Cloud size={11} className="mr-1.5" />
+            Cloud · salvato {lastSaved}
           </Pill>
         ) : (
-          <Pill className="bg-zinc-800/60 text-zinc-400 border-zinc-700 whitespace-nowrap" title="Il progetto viene salvato automaticamente in questo browser. Per condividerlo con i tuoi collaboratori, apri questo file come artifact di Claude e condividilo da lì.">
-            <HardDrive size={11} className="mr-1.5 text-lime-400" />
-            Salvato {lastSaved} nel browser
+          <Pill className="bg-zinc-800/60 text-zinc-400 border-zinc-700 whitespace-nowrap" title="Nessun database collegato: il progetto viene salvato solo in questo browser e non è condiviso con altri dispositivi o persone.">
+            <HardDrive size={11} className="mr-1.5 text-amber-400" />
+            Solo locale · salvato {lastSaved}
           </Pill>
         )}
       </div>
@@ -1630,6 +1750,12 @@ function ExportView({ epTitle, tracks, beats, songs }) {
    APP ROOT
    ========================================================================= */
 
+// Identifies this browser tab so we can recognize (and ignore) our own
+// writes when they echo back through the real-time subscription — without
+// this, a save firing while you're still typing could revert your latest
+// keystrokes back to what was just saved a moment earlier.
+const CLIENT_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+
 function App() {
   const [epTitle, setEpTitle] = useState('Echoes EP');
   const [activeView, setActiveView] = useState('dashboard');
@@ -1641,11 +1767,23 @@ function App() {
   const [hydrated, setHydrated] = useState(false);
   const [customBeats, setCustomBeats] = useState([]);
   const [customSongs, setCustomSongs] = useState([]);
-  const [storageMode] = useState(hasSharedStorage ? 'shared' : 'local');
+  // Edits (rename, BPM fix, ecc.) made to a PRELOADED beat/song — these
+  // can't mutate MOCK_BEATS/MOCK_SONGS directly (they're hardcoded in the
+  // file), so we keep a small patch per id instead, synced like everything
+  // else so every collaborator sees the correction too.
+  const [beatOverrides, setBeatOverrides] = useState({});
+  const [songOverrides, setSongOverrides] = useState({});
+  const [storageMode] = useState(cloudReady ? 'cloud' : 'local');
   const [syncing, setSyncing] = useState(false);
 
-  const allBeats = [...MOCK_BEATS, ...customBeats];
-  const allSongs = [...MOCK_SONGS, ...customSongs];
+  const allBeats = [
+    ...MOCK_BEATS.map((b) => ({ ...b, ...(beatOverrides[b.id] || {}) })),
+    ...customBeats,
+  ];
+  const allSongs = [
+    ...MOCK_SONGS.map((s) => ({ ...s, ...(songOverrides[s.id] || {}) })),
+    ...customSongs,
+  ];
 
   const [tracks, setTracks] = useState(() => [
     {
@@ -1666,63 +1804,81 @@ function App() {
   const playIntervalRef = useRef(null);
   const audioRef = useRef(null);
   const positionsRef = useRef({});
-  const lastLocalEditAtRef = useRef(0);
-  const savedAtRef = useRef(0);
+  const applyingRemoteRef = useRef(false);
 
-  // Re-hydrate custom beats/songs metadata with whatever audio Blobs this
-  // browser actually has stored locally (audio is never synced via shared
-  // storage — only the metadata is).
-  const hydrateMediaWithLocalAudio = async (saved) => {
+  // Apply a freshly loaded/synced project document to local state. Cloud
+  // audio URLs are used directly; anything else falls back to whatever
+  // this browser has cached locally.
+  const applyProjectData = async (saved) => {
+    applyingRemoteRef.current = true;
     if (typeof saved.epTitle === 'string') setEpTitle(saved.epTitle);
     if (Array.isArray(saved.tracks)) {
       setTracks(saved.tracks.map((t) => ({ songId: null, lyrics: '', ...t })));
     }
     if (saved.beatNotes) setBeatNotes(saved.beatNotes);
     if (saved.songNotes) setSongNotes(saved.songNotes);
+    if (saved.beatOverrides) setBeatOverrides(saved.beatOverrides);
+    if (saved.songOverrides) setSongOverrides(saved.songOverrides);
 
     if (Array.isArray(saved.customBeats)) {
       const restored = await Promise.all(
-        saved.customBeats.map(async (b) => {
-          try {
-            const blob = await idbGet('audio', 'beat_' + b.id);
-            return { ...b, audioUrl: blob ? URL.createObjectURL(blob) : null };
-          } catch {
-            return { ...b, audioUrl: null };
-          }
-        })
+        saved.customBeats.map(async (b) => ({ ...b, audioUrl: await resolveAudioUrl(b, 'beat') }))
       );
       setCustomBeats(restored);
     }
-
     if (Array.isArray(saved.customSongs)) {
       const restored = await Promise.all(
-        saved.customSongs.map(async (s) => {
-          try {
-            const blob = await idbGet('audio', 'song_' + s.id);
-            return { ...s, audioUrl: blob ? URL.createObjectURL(blob) : null };
-          } catch {
-            return { ...s, audioUrl: null };
-          }
-        })
+        saved.customSongs.map(async (s) => ({ ...s, audioUrl: await resolveAudioUrl(s, 'song') }))
       );
       setCustomSongs(restored);
     }
+    // let the next tick's autosave effect see this as "not a local edit"
+    setTimeout(() => { applyingRemoteRef.current = false; }, 0);
   };
 
   /* ---------------------------------------------------------------------
-     Load the saved project on first mount — from shared storage if this is
-     running as a Claude artifact (so collaborators see the same project),
-     otherwise from this browser's IndexedDB.
+     Load + (when Firebase is configured) live-sync the project.
+     - Cloud mode: a single Firestore onSnapshot subscription both loads the
+       project on mount AND pushes every future change from any
+       collaborator, in real time — no polling needed.
+     - Local mode: one-time load from this browser's IndexedDB.
      --------------------------------------------------------------------- */
   useEffect(() => {
     let cancelled = false;
+
+    if (cloudReady) {
+      const unsubscribe = subscribeToProjectData(
+        async (data, isOwnPendingWrite) => {
+          if (cancelled) return;
+          const isOwnWrite = isOwnPendingWrite || (data && data.savedBy === CLIENT_ID);
+          if (isOwnWrite) {
+            // Either our own optimistic local echo, or the server's
+            // confirmation of a write we made — our state already
+            // reflects it (or has moved on since), so don't reapply it.
+            if (!hydrated) setHydrated(true);
+            return;
+          }
+          if (data) await applyProjectData(data);
+          if (!hydrated) setHydrated(true);
+        },
+        (err) => {
+          console.warn('Sincronizzazione con Firebase non riuscita:', err);
+          if (!cancelled) {
+            setSaveError(true);
+            setHydrated(true);
+          }
+        }
+      );
+      return () => {
+        cancelled = true;
+        unsubscribe();
+      };
+    }
+
     (async () => {
       try {
         const saved = await loadProjectData();
-        if (saved && !cancelled) {
-          await hydrateMediaWithLocalAudio(saved);
-          savedAtRef.current = saved.savedAt || 0;
-        }
+        if (saved && !cancelled) await applyProjectData(saved);
       } catch (err) {
         console.warn('Impossibile caricare il progetto salvato:', err);
       } finally {
@@ -1736,25 +1892,26 @@ function App() {
 
   /* ---------------------------------------------------------------------
      Autosave whenever the project changes (debounced so rapid edits don't
-     trigger a write per keystroke). Goes to shared storage when available,
-     otherwise to this browser's IndexedDB.
+     trigger a write per keystroke). Goes to Firestore when configured,
+     otherwise to this browser's IndexedDB. Skipped right after we just
+     applied a remote update, so we don't immediately "save" what we only
+     just received.
      --------------------------------------------------------------------- */
   useEffect(() => {
-    if (!hydrated) return;
-    lastLocalEditAtRef.current = Date.now();
+    if (!hydrated || applyingRemoteRef.current) return;
     const t = setTimeout(() => {
-      const savedAt = Date.now();
       saveProjectData({
         epTitle,
         tracks,
         beatNotes,
         songNotes,
-        customBeats: customBeats.map(stripAudioUrl),
-        customSongs: customSongs.map(stripAudioUrl),
-        savedAt,
+        beatOverrides: sanitizeOverridesForSave(beatOverrides),
+        songOverrides: sanitizeOverridesForSave(songOverrides),
+        customBeats: customBeats.map(sanitizeForSave),
+        customSongs: customSongs.map(sanitizeForSave),
+        savedBy: CLIENT_ID,
       })
         .then(() => {
-          savedAtRef.current = savedAt;
           setLastSaved('ora');
           setSaveError(false);
         })
@@ -1764,49 +1921,19 @@ function App() {
         });
     }, 500);
     return () => clearTimeout(t);
-  }, [epTitle, tracks, beatNotes, songNotes, customBeats, customSongs, hydrated]);
-
-  /* ---------------------------------------------------------------------
-     Collaborative sync: when running in shared mode, periodically check
-     whether a collaborator saved a newer version, and pull it in — but
-     never while there's a local edit in flight (avoids clobbering what
-     you're typing).
-     --------------------------------------------------------------------- */
-  const pullRemote = async (force = false) => {
-    if (!hasSharedStorage) return;
-    try {
-      const remote = await loadProjectData();
-      if (!remote) return;
-      const remoteSavedAt = remote.savedAt || 0;
-      const recentLocalEdit = Date.now() - lastLocalEditAtRef.current < 4000;
-      if (remoteSavedAt > savedAtRef.current && (force || !recentLocalEdit)) {
-        await hydrateMediaWithLocalAudio(remote);
-        savedAtRef.current = remoteSavedAt;
-        setLastSaved('ora (da un collaboratore)');
-      }
-    } catch (err) {
-      console.warn('Sincronizzazione con il progetto condiviso non riuscita:', err);
-    }
-  };
-
-  useEffect(() => {
-    if (!hydrated || !hasSharedStorage) return;
-    const interval = setInterval(() => pullRemote(false), 10000);
-    const onFocus = () => pullRemote(false);
-    window.addEventListener('focus', onFocus);
-    document.addEventListener('visibilitychange', onFocus);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', onFocus);
-      document.removeEventListener('visibilitychange', onFocus);
-    };
-  }, [hydrated]);
+  }, [epTitle, tracks, beatNotes, songNotes, beatOverrides, songOverrides, customBeats, customSongs, hydrated]);
 
   const handleManualSync = async () => {
-    if (!hasSharedStorage) return;
+    if (!cloudReady) return;
     setSyncing(true);
-    await pullRemote(true);
-    setSyncing(false);
+    try {
+      const remote = await loadProjectData();
+      if (remote) await applyProjectData(remote);
+    } catch (err) {
+      console.warn('Sincronizzazione manuale non riuscita:', err);
+    } finally {
+      setSyncing(false);
+    }
   };
 
   /* ---------------------------------------------------------------------
@@ -1920,54 +2047,102 @@ function App() {
   const handleNotesChange = (beatId, value) => setBeatNotes((prev) => ({ ...prev, [beatId]: value }));
   const handleNotesChangeSong = (songId, value) => setSongNotes((prev) => ({ ...prev, [songId]: value }));
 
-  const handleAddCustomBeat = (beat, file) => {
+  // Show the new item immediately (optimistic), then push its audio to
+  // Firebase Storage if configured so every collaborator can hear it too.
+  const handleAddCustomBeat = async (beat, file) => {
     setCustomBeats((prev) => [...prev, beat]);
-    if (file) {
-      idbSet('audio', 'beat_' + beat.id, file).catch((err) =>
-        console.warn('Impossibile salvare il file audio del beat in locale:', err)
-      );
+    if (!file) return;
+    if (cloudReady) {
+      try {
+        const url = await uploadAudioToCloud('beat', beat.id, file);
+        setCustomBeats((prev) => prev.map((b) => (b.id === beat.id ? { ...b, audioUrl: url } : b)));
+        return;
+      } catch (err) {
+        console.warn('Caricamento audio su Firebase non riuscito, resta solo locale:', err);
+      }
     }
+    idbSet('audio', 'beat_' + beat.id, file).catch((err) =>
+      console.warn('Impossibile salvare il file audio del beat in locale:', err)
+    );
   };
 
-  const handleAddCustomSong = (song, file) => {
+  const handleAddCustomSong = async (song, file) => {
     setCustomSongs((prev) => [...prev, song]);
-    if (file) {
-      idbSet('audio', 'song_' + song.id, file).catch((err) =>
-        console.warn('Impossibile salvare il file audio della canzone in locale:', err)
-      );
+    if (!file) return;
+    if (cloudReady) {
+      try {
+        const url = await uploadAudioToCloud('song', song.id, file);
+        setCustomSongs((prev) => prev.map((s) => (s.id === song.id ? { ...s, audioUrl: url } : s)));
+        return;
+      } catch (err) {
+        console.warn('Caricamento audio su Firebase non riuscito, resta solo locale:', err);
+      }
     }
+    idbSet('audio', 'song_' + song.id, file).catch((err) =>
+      console.warn('Impossibile salvare il file audio della canzone in locale:', err)
+    );
   };
 
   const handleEditBeat = (beatId, patch) => {
-    setCustomBeats((prev) => prev.map((b) => (b.id === beatId ? { ...b, ...patch } : b)));
+    if (MOCK_BEATS.some((b) => b.id === beatId)) {
+      setBeatOverrides((prev) => ({ ...prev, [beatId]: { ...prev[beatId], ...patch } }));
+    } else {
+      setCustomBeats((prev) => prev.map((b) => (b.id === beatId ? { ...b, ...patch } : b)));
+    }
   };
 
   const handleEditSong = (songId, patch) => {
-    setCustomSongs((prev) => prev.map((s) => (s.id === songId ? { ...s, ...patch } : s)));
+    if (MOCK_SONGS.some((s) => s.id === songId)) {
+      setSongOverrides((prev) => ({ ...prev, [songId]: { ...prev[songId], ...patch } }));
+    } else {
+      setCustomSongs((prev) => prev.map((s) => (s.id === songId ? { ...s, ...patch } : s)));
+    }
   };
 
-  // Lets a collaborator attach their own local copy of a beat/song's audio
-  // when the metadata is shared but the actual file isn't on their device.
-  const handleAttachAudio = (item, file) => {
-    const url = URL.createObjectURL(file);
-    const isBeat = customBeats.some((b) => b.id === item.id);
-    if (isBeat) {
-      setCustomBeats((prev) => prev.map((b) => (b.id === item.id ? { ...b, audioUrl: url } : b)));
-      idbSet('audio', 'beat_' + item.id, file).catch((err) => console.warn('Impossibile salvare il file audio in locale:', err));
+  // Lets someone attach audio for an item whose metadata is there but the
+  // file isn't playable yet on their device (e.g. cloud upload hadn't
+  // finished, or this is local-only mode). Works for both preloaded
+  // (MOCK_BEATS/MOCK_SONGS) and uploaded items.
+  const handleAttachAudio = async (item, file) => {
+    const isPreloadedBeat = MOCK_BEATS.some((b) => b.id === item.id);
+    const isPreloadedSong = !isPreloadedBeat && MOCK_SONGS.some((s) => s.id === item.id);
+    const isCustomBeat = !isPreloadedBeat && !isPreloadedSong && customBeats.some((b) => b.id === item.id);
+    const kind = isPreloadedBeat || isCustomBeat ? 'beat' : 'song';
+
+    let cloudUrl = null;
+    if (cloudReady) {
+      try {
+        cloudUrl = await uploadAudioToCloud(kind, item.id, file);
+      } catch (err) {
+        console.warn('Caricamento audio su Firebase non riuscito, resta solo locale:', err);
+      }
+    }
+    const finalUrl = cloudUrl || URL.createObjectURL(file);
+
+    if (isPreloadedBeat) {
+      setBeatOverrides((prev) => ({ ...prev, [item.id]: { ...prev[item.id], audioUrl: finalUrl } }));
+    } else if (isPreloadedSong) {
+      setSongOverrides((prev) => ({ ...prev, [item.id]: { ...prev[item.id], audioUrl: finalUrl } }));
+    } else if (isCustomBeat) {
+      setCustomBeats((prev) => prev.map((x) => (x.id === item.id ? { ...x, audioUrl: finalUrl } : x)));
     } else {
-      setCustomSongs((prev) => prev.map((s) => (s.id === item.id ? { ...s, audioUrl: url } : s)));
-      idbSet('audio', 'song_' + item.id, file).catch((err) => console.warn('Impossibile salvare il file audio in locale:', err));
+      setCustomSongs((prev) => prev.map((x) => (x.id === item.id ? { ...x, audioUrl: finalUrl } : x)));
+    }
+
+    if (!cloudUrl) {
+      idbSet('audio', kind + '_' + item.id, file).catch((err) => console.warn('Impossibile salvare il file audio in locale:', err));
     }
   };
 
   const handleDeleteCustomBeat = (beatId) => {
     setCustomBeats((prev) => {
       const target = prev.find((b) => b.id === beatId);
-      if (target?.audioUrl) URL.revokeObjectURL(target.audioUrl);
+      if (target?.audioUrl && target.audioUrl.startsWith('blob:')) URL.revokeObjectURL(target.audioUrl);
       return prev.filter((b) => b.id !== beatId);
     });
     setTracks((prev) => prev.map((t) => (t.beatId === beatId ? { ...t, beatId: null } : t)));
     idbDelete('audio', 'beat_' + beatId).catch(() => {});
+    deleteAudioFromCloud('beat', beatId);
     delete positionsRef.current[beatId];
     if (playState.id === beatId) {
       clearInterval(playIntervalRef.current);
@@ -1982,11 +2157,12 @@ function App() {
   const handleDeleteCustomSong = (songId) => {
     setCustomSongs((prev) => {
       const target = prev.find((s) => s.id === songId);
-      if (target?.audioUrl) URL.revokeObjectURL(target.audioUrl);
+      if (target?.audioUrl && target.audioUrl.startsWith('blob:')) URL.revokeObjectURL(target.audioUrl);
       return prev.filter((s) => s.id !== songId);
     });
     setTracks((prev) => prev.map((t) => (t.songId === songId ? { ...t, songId: null } : t)));
     idbDelete('audio', 'song_' + songId).catch(() => {});
+    deleteAudioFromCloud('song', songId);
     delete positionsRef.current[songId];
     if (playState.id === songId) {
       clearInterval(playIntervalRef.current);
