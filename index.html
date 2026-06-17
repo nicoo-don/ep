@@ -1,0 +1,2192 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EP Music Builder</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script async src="https://ga.jspm.io/npm:es-module-shims@1.8.2/dist/es-module-shims.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.2.0",
+    "react/jsx-runtime": "https://esm.sh/react@18.2.0/jsx-runtime",
+    "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react"
+  }
+}
+</script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #09090b; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useEffect, useRef } from 'react';
+import ReactDOM from 'react-dom/client';
+import {
+  LayoutDashboard, Library, Layers, ListMusic, Download, Music2, Play, Pause,
+  Plus, Trash2, Copy, GripVertical, Pencil, Check, X, ChevronDown, Disc3,
+  Sparkles, Clock, FileJson, Printer, ArrowLeft, Upload, FolderUp, Mic2,
+  HardDrive, Link2Off, FileText, Cloud, Users, RefreshCw, AlertTriangle
+} from 'lucide-react';
+
+
+/* =========================================================================
+   MOCK DATA
+   ========================================================================= */
+
+const MOCK_BEATS = [
+];
+
+const MOCK_SONGS = [];
+
+const GENRE_COLORS = {
+  trap: 'bg-violet-500/20 text-violet-300 border-violet-500/40',
+  drill: 'bg-blue-500/20 text-blue-300 border-blue-500/40',
+  'lo-fi': 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40',
+  pop: 'bg-lime-400/20 text-lime-300 border-lime-400/40',
+  'r&b': 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/40',
+  custom: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+};
+
+const SECTION_COLORS = {
+  Intro: 'bg-violet-500',
+  Verse: 'bg-blue-500',
+  'Pre-Hook': 'bg-indigo-500',
+  Hook: 'bg-lime-400',
+  Bridge: 'bg-fuchsia-500',
+  Outro: 'bg-cyan-500',
+  Breakdown: 'bg-amber-500',
+  'Ad-libs': 'bg-pink-500',
+};
+
+const SECTION_TEXT_DARK = new Set(['Hook']);
+
+const SECTION_TYPE_OPTIONS = ['Intro', 'Verse', 'Pre-Hook', 'Hook', 'Bridge', 'Breakdown', 'Ad-libs', 'Outro'];
+
+const DEFAULT_DURATIONS = {
+  Intro: 15, Verse: 45, 'Pre-Hook': 10, Hook: 20, Bridge: 20, Breakdown: 15, 'Ad-libs': 8, Outro: 15,
+};
+
+/* =========================================================================
+   HELPERS
+   ========================================================================= */
+
+let _id = 100;
+const uid = () => `id_${_id++}_${Math.random().toString(36).slice(2, 6)}`;
+
+function formatTime(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${r.toString().padStart(2, '0')}`;
+}
+
+function sectionColor(label) {
+  const base = label.replace(/\s*\d+$/, '').trim();
+  return SECTION_COLORS[base] || 'bg-zinc-500';
+}
+
+function sectionTextColor(label) {
+  const base = label.replace(/\s*\d+$/, '').trim();
+  return SECTION_TEXT_DARK.has(base) ? 'text-zinc-900' : 'text-white';
+}
+
+function newStructure() {
+  return [
+    { id: uid(), label: 'Intro', duration: 15, notes: '' },
+    { id: uid(), label: 'Verse 1', duration: 45, notes: '' },
+    { id: uid(), label: 'Hook', duration: 20, notes: '' },
+    { id: uid(), label: 'Verse 2', duration: 45, notes: '' },
+    { id: uid(), label: 'Hook', duration: 20, notes: '' },
+    { id: uid(), label: 'Outro', duration: 15, notes: '' },
+  ];
+}
+
+function newTrack(beatId = null, songId = null) {
+  return {
+    id: uid(),
+    title: 'Untitled track',
+    beatId,
+    songId,
+    mood: '',
+    lyrics: '',
+    structure: newStructure(),
+  };
+}
+
+function trackTotalDuration(track) {
+  return track.structure.reduce((sum, s) => sum + (Number(s.duration) || 0), 0);
+}
+
+function trackIsComplete(track) {
+  return Boolean(track.beatId) && track.structure.length >= 4 && track.structure.every((s) => Number(s.duration) > 0);
+}
+
+// Three-state status used on the Dashboard: both beat+song linked, only beat, or nothing yet.
+function trackMediaStatus(track) {
+  const hasBeat = Boolean(track.beatId);
+  const hasSong = Boolean(track.songId);
+  if (hasBeat && hasSong) return 'complete';
+  if (hasBeat) return 'beatOnly';
+  return 'inProgress';
+}
+
+function moveItem(arr, from, to) {
+  const copy = [...arr];
+  const [item] = copy.splice(from, 1);
+  copy.splice(to, 0, item);
+  return copy;
+}
+
+const MOOD_OPTIONS = ['dark', 'energetic', 'chill', 'happy', 'aggressive', 'romantic', 'nostalgic', 'uplifting'];
+
+/* =========================================================================
+   PERSISTENCE
+   Two layers:
+   1) PROJECT DATA (EP title, tracks, structure, lyrics, notes, beat/song
+      metadata) -> if this file is opened as a Claude artifact, window.storage
+      is available and we use shared:true keys so that everyone who opens
+      the same shared artifact sees and can edit the same project. If
+      window.storage isn't available (e.g. the file was downloaded and
+      opened directly in a browser), we fall back to this browser's
+      IndexedDB, exactly like before — local-only, but still durable
+      across refreshes.
+   2) AUDIO FILES (the actual uploaded mp3/wav bytes) are ALWAYS kept in
+      this browser's IndexedDB only. Shared cloud storage for artifacts is
+      text/JSON-only with a 5MB-per-key cap, so multi-megabyte audio files
+      can't be synced through it. Each collaborator keeps their own local
+      copy of whatever audio they uploaded or attached.
+   ========================================================================= */
+
+const DB_NAME = 'ep_music_builder_db';
+const DB_VERSION = 1;
+const META_KEY = 'project_v1';
+const SHARED_PROJECT_KEY = 'ep_project_shared_v1';
+
+const hasSharedStorage = typeof window !== 'undefined' && !!window.storage;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) {
+      reject(new Error('IndexedDB non disponibile'));
+      return;
+    }
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+      if (!db.objectStoreNames.contains('audio')) db.createObjectStore('audio');
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbGet(storeName, key) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readonly');
+    const req = tx.objectStore(storeName).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbSet(storeName, key, value) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function idbDelete(storeName, key) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// Save the project's text/JSON data using whichever backend is available.
+async function saveProjectData(data) {
+  if (hasSharedStorage) {
+    await window.storage.set(SHARED_PROJECT_KEY, JSON.stringify(data), true);
+    return 'shared';
+  }
+  await idbSet('meta', META_KEY, data);
+  return 'local';
+}
+
+async function loadProjectData() {
+  if (hasSharedStorage) {
+    const res = await window.storage.get(SHARED_PROJECT_KEY, true);
+    return res ? JSON.parse(res.value) : null;
+  }
+  return idbGet('meta', META_KEY);
+}
+
+// strip in-memory-only fields (object URLs become invalid after reload, and
+// are never sent to shared storage anyway since they're local blob: URLs)
+function stripAudioUrl(item) {
+  const { audioUrl, ...rest } = item;
+  return rest;
+}
+
+/* =========================================================================
+   SMALL UI PIECES
+   ========================================================================= */
+
+function Pill({ children, className = '' }) {
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium border ${className}`}>
+      {children}
+    </span>
+  );
+}
+
+function ProgressBar({ value, className = '' }) {
+  return (
+    <div className={`h-2 w-full rounded-full bg-zinc-800 overflow-hidden ${className}`}>
+      <div
+        className="h-full rounded-full bg-gradient-to-r from-violet-500 via-blue-500 to-lime-400 transition-all duration-500"
+        style={{ width: `${Math.min(100, Math.max(0, value))}%` }}
+      />
+    </div>
+  );
+}
+
+function StatusBadge({ complete }) {
+  return complete ? (
+    <Pill className="bg-lime-400/15 text-lime-300 border-lime-400/40">
+      <Check size={12} className="mr-1" /> Completo
+    </Pill>
+  ) : (
+    <Pill className="bg-zinc-700/40 text-zinc-400 border-zinc-600">In corso</Pill>
+  );
+}
+
+function MediaStatusBadge({ status }) {
+  if (status === 'complete') {
+    return (
+      <Pill className="bg-lime-400/15 text-lime-300 border-lime-400/40">
+        <Check size={12} className="mr-1" /> Completato
+      </Pill>
+    );
+  }
+  if (status === 'beatOnly') {
+    return (
+      <Pill className="bg-blue-500/15 text-blue-300 border-blue-500/40">
+        <Disc3 size={12} className="mr-1" /> Solo beat
+      </Pill>
+    );
+  }
+  return <Pill className="bg-zinc-700/40 text-zinc-400 border-zinc-600">In corso</Pill>;
+}
+
+/* =========================================================================
+   AUDIO PREVIEW (simulated)
+   ========================================================================= */
+
+function BeatPreviewPlayer({ beat, isPlaying, progress, onToggle, onSeek }) {
+  const barRef = useRef(null);
+
+  const handleSeek = (e) => {
+    if (!onSeek || !barRef.current) return;
+    const rect = barRef.current.getBoundingClientRect();
+    const fraction = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    onSeek(fraction);
+  };
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        onClick={onToggle}
+        className="flex items-center justify-center w-8 h-8 rounded-full bg-zinc-800 hover:bg-violet-500/30 border border-zinc-700 hover:border-violet-400 transition-colors text-zinc-200 hover:text-lime-300 shrink-0"
+        aria-label={isPlaying ? 'Pausa anteprima' : 'Riproduci anteprima'}
+      >
+        {isPlaying ? <Pause size={14} /> : <Play size={14} />}
+      </button>
+      <div
+        ref={barRef}
+        onClick={handleSeek}
+        title="Clicca per spostare la posizione"
+        className="flex-1 h-1.5 rounded-full bg-zinc-800 overflow-hidden relative cursor-pointer hover:h-2 transition-[height]"
+      >
+        <div
+          className={`h-full ${isPlaying ? 'bg-lime-400' : 'bg-zinc-500'} transition-[width] duration-100 linear`}
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+      <span className="font-mono text-[11px] text-zinc-500 w-10 text-right shrink-0">
+        {formatTime(beat.duration)}
+      </span>
+    </div>
+  );
+}
+
+/* =========================================================================
+   BEAT CARD
+   ========================================================================= */
+
+function BeatCard({ beat, onAddToEp, playState, onTogglePlay, onSeek, compact = false, notesValue, onNotesChange, onDelete, onEdit, onAttachAudio, kind = 'beat' }) {
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const isPlaying = playState.id === beat.id && playState.playing;
+  const isCurrent = playState.id === beat.id;
+  const ItemIcon = kind === 'song' ? Mic2 : Disc3;
+  const itemWord = kind === 'song' ? 'canzone' : 'beat';
+  const audioMissing = !beat.audioUrl;
+
+  if (editOpen) {
+    return <EditMediaForm item={beat} kind={kind} onSave={onEdit} onClose={() => setEditOpen(false)} />;
+  }
+
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 flex flex-col gap-3 hover:border-violet-500/50 transition-colors">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h3 className="font-display text-base font-semibold text-zinc-100 leading-tight">{beat.name}</h3>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1 text-xs text-zinc-400 font-mono">
+            <span>{beat.bpm} BPM</span>
+            <span>{beat.key}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {!compact && onEdit && (
+            <button
+              onClick={() => setEditOpen(true)}
+              title={`Modifica ${itemWord}`}
+              className="w-7 h-7 rounded-lg border border-zinc-700 hover:border-violet-400 hover:text-violet-300 text-zinc-500 flex items-center justify-center transition-colors"
+            >
+              <Pencil size={13} />
+            </button>
+          )}
+          {beat.isCustom && onDelete && (
+            <button
+              onClick={() => onDelete(beat.id)}
+              title={`Rimuovi ${itemWord}`}
+              className="w-7 h-7 rounded-lg border border-zinc-700 hover:border-red-400 hover:text-red-400 text-zinc-500 flex items-center justify-center transition-colors"
+            >
+              <Trash2 size={13} />
+            </button>
+          )}
+          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-violet-500/30 to-blue-500/30 border border-zinc-700 flex items-center justify-center">
+            <ItemIcon size={16} className="text-violet-300" />
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-1.5">
+        {beat.isCustom && (
+          <Pill className={GENRE_COLORS.custom}>
+            <Upload size={10} className="mr-1" /> tua {itemWord}
+          </Pill>
+        )}
+        {beat.tags.map((t) => (
+          <Pill key={t} className={GENRE_COLORS[beat.genre] || 'bg-zinc-700/40 text-zinc-300 border-zinc-600'}>
+            {t}
+          </Pill>
+        ))}
+      </div>
+
+      {audioMissing ? (
+        <label className="flex items-center justify-between gap-2 rounded-lg border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2 cursor-pointer hover:border-amber-400 transition-colors">
+          <span className="flex items-center gap-1.5 text-xs text-amber-300">
+            <AlertTriangle size={13} /> Audio non presente su questo dispositivo
+          </span>
+          <span className="text-[11px] text-amber-200 underline shrink-0">Allega file</span>
+          <input
+            type="file"
+            accept="audio/*"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files[0];
+              if (f && onAttachAudio) onAttachAudio(beat, f);
+            }}
+          />
+        </label>
+      ) : (
+        <BeatPreviewPlayer
+          beat={beat}
+          isPlaying={isPlaying}
+          progress={isCurrent ? playState.progress : 0}
+          onToggle={() => onTogglePlay(beat)}
+          onSeek={(fraction) => onSeek && onSeek(beat, fraction)}
+        />
+      )}
+
+      {!compact && (
+        <button
+          onClick={() => setNotesOpen((v) => !v)}
+          className="flex items-center gap-1 text-xs text-zinc-500 hover:text-lime-300 transition-colors self-start"
+        >
+          <Sparkles size={12} />
+          {notesOpen ? 'Nascondi note ispirazione' : 'Note ispirazione'}
+        </button>
+      )}
+      {!compact && notesOpen && (
+        <textarea
+          value={notesValue}
+          onChange={(e) => onNotesChange(beat.id, e.target.value)}
+          placeholder={`Idee, riferimenti, atmosfere per questa ${itemWord}...`}
+          rows={2}
+          className="w-full resize-none rounded-lg bg-zinc-950 border border-zinc-800 focus:border-violet-500 outline-none text-xs text-zinc-300 p-2 placeholder:text-zinc-600"
+        />
+      )}
+
+      <button
+        onClick={() => onAddToEp(beat)}
+        className="mt-auto flex items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 text-white text-sm font-medium py-2 transition-all"
+      >
+        <Plus size={15} /> Aggiungi all'EP
+      </button>
+    </div>
+  );
+}
+
+/* =========================================================================
+   SIDEBAR / NAV
+   ========================================================================= */
+
+const NAV_ITEMS = [
+  { id: 'dashboard', label: 'Dashboard', short: 'Home', icon: LayoutDashboard },
+  { id: 'library', label: 'Libreria Beat', short: 'Beat', icon: Library },
+  { id: 'songLibrary', label: 'Libreria Canzoni', short: 'Canzoni', icon: Mic2 },
+  { id: 'builder', label: 'Song Builder', short: 'Builder', icon: Layers },
+  { id: 'tracker', label: 'EP Tracker', short: 'Tracker', icon: ListMusic },
+  { id: 'export', label: 'Export', short: 'Export', icon: Download },
+];
+
+function Sidebar({ activeView, setActiveView }) {
+  return (
+    <>
+      {/* Desktop sidebar */}
+      <aside className="hidden md:flex md:flex-col w-56 shrink-0 border-r border-zinc-800 bg-zinc-950/80 p-4 gap-1">
+        <div className="flex items-center gap-2 px-2 py-3 mb-2">
+          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-violet-500 to-lime-400 flex items-center justify-center">
+            <Music2 size={18} className="text-zinc-950" />
+          </div>
+          <div>
+            <p className="font-display font-bold text-sm text-zinc-100 leading-none">EP Builder</p>
+            <p className="text-[11px] text-zinc-500">studio session</p>
+          </div>
+        </div>
+        {NAV_ITEMS.map((item) => {
+          const Icon = item.icon;
+          const active = activeView === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => setActiveView(item.id)}
+              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                active
+                  ? 'bg-gradient-to-r from-violet-600/30 to-blue-600/20 text-lime-300 border border-violet-500/40'
+                  : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 border border-transparent'
+              }`}
+            >
+              <Icon size={17} />
+              {item.label}
+            </button>
+          );
+        })}
+      </aside>
+
+      {/* Mobile bottom nav */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-zinc-950/95 border-t border-zinc-800 flex justify-around px-1 py-1.5 backdrop-blur">
+        {NAV_ITEMS.map((item) => {
+          const Icon = item.icon;
+          const active = activeView === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => setActiveView(item.id)}
+              className={`flex flex-col items-center gap-0.5 px-2 py-1.5 rounded-lg text-[10px] font-medium transition-colors ${
+                active ? 'text-lime-300' : 'text-zinc-500'
+              }`}
+            >
+              <Icon size={18} />
+              {item.short || item.label.split(' ')[0]}
+            </button>
+          );
+        })}
+      </nav>
+    </>
+  );
+}
+
+/* =========================================================================
+   TOP BAR
+   ========================================================================= */
+
+function TopBar({ epTitle, setEpTitle, progress, lastSaved, saveError, storageMode, syncing, onSync }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(epTitle);
+
+  const commit = () => {
+    setEpTitle(draft.trim() || 'Untitled EP');
+    setEditing(false);
+  };
+
+  return (
+    <header className="border-b border-zinc-800 bg-zinc-950/60 px-4 md:px-8 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+      <div className="flex items-center gap-2 min-w-0">
+        {editing ? (
+          <>
+            <input
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && commit()}
+              className="font-display text-xl sm:text-2xl font-bold bg-transparent border-b-2 border-violet-500 outline-none text-zinc-100 min-w-0"
+            />
+            <button onClick={commit} className="text-lime-400 hover:text-lime-300">
+              <Check size={18} />
+            </button>
+          </>
+        ) : (
+          <>
+            <h1 className="font-display text-xl sm:text-2xl font-bold text-zinc-100 truncate">{epTitle}</h1>
+            <button onClick={() => { setDraft(epTitle); setEditing(true); }} className="text-zinc-500 hover:text-violet-400 shrink-0">
+              <Pencil size={14} />
+            </button>
+          </>
+        )}
+      </div>
+
+      <div className="flex items-center gap-3">
+        <div className="hidden sm:flex flex-col w-40">
+          <div className="flex justify-between text-[11px] text-zinc-500 mb-1">
+            <span>Avanzamento EP</span>
+            <span className="font-mono">{Math.round(progress)}%</span>
+          </div>
+          <ProgressBar value={progress} />
+        </div>
+
+        {storageMode === 'shared' && (
+          <button
+            onClick={onSync}
+            disabled={syncing}
+            title="Controlla se i tuoi collaboratori hanno salvato nuove modifiche"
+            className="w-8 h-8 rounded-lg border border-zinc-700 hover:border-violet-400 text-zinc-400 hover:text-violet-300 flex items-center justify-center transition-colors disabled:opacity-50 shrink-0"
+          >
+            <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
+          </button>
+        )}
+
+        {saveError ? (
+          <Pill className="bg-red-500/15 text-red-300 border-red-500/40 whitespace-nowrap" title="Il salvataggio non è riuscito. Le modifiche potrebbero non persistere dopo un aggiornamento della pagina.">
+            <span className="w-1.5 h-1.5 rounded-full bg-red-400 mr-1.5" />
+            Salvataggio non riuscito
+          </Pill>
+        ) : storageMode === 'shared' ? (
+          <Pill className="bg-violet-500/15 text-violet-300 border-violet-500/40 whitespace-nowrap" title="Le modifiche al progetto (testi, struttura, beat/canzoni collegati) sono condivise: chiunque apra questo stesso artifact le vede e può modificarle. I file audio caricati restano invece solo su questo dispositivo.">
+            <Users size={11} className="mr-1.5" />
+            Condiviso · salvato {lastSaved}
+          </Pill>
+        ) : (
+          <Pill className="bg-zinc-800/60 text-zinc-400 border-zinc-700 whitespace-nowrap" title="Il progetto viene salvato automaticamente in questo browser. Per condividerlo con i tuoi collaboratori, apri questo file come artifact di Claude e condividilo da lì.">
+            <HardDrive size={11} className="mr-1.5 text-lime-400" />
+            Salvato {lastSaved} nel browser
+          </Pill>
+        )}
+      </div>
+    </header>
+  );
+}
+
+/* =========================================================================
+   DASHBOARD
+   ========================================================================= */
+
+function Dashboard({ epTitle, tracks, beats, songs, onAddTrack, onOpenTrack, onGoLibrary, playState, onTogglePlay }) {
+  const completed = tracks.filter(trackIsComplete).length;
+  const total = tracks.length;
+  const progress = total ? (completed / total) * 100 : 0;
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <p className="text-violet-400 text-xs font-mono uppercase tracking-widest mb-1">Sessione corrente</p>
+        <h2 className="font-display text-2xl md:text-3xl font-bold text-zinc-100">{epTitle}</h2>
+        <p className="text-zinc-500 text-sm mt-1">Vista generale della produzione del tuo EP.</p>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4">
+          <p className="text-zinc-500 text-xs mb-1">Brani totali</p>
+          <p className="font-display text-3xl font-bold text-zinc-100">{total}</p>
+        </div>
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4">
+          <p className="text-zinc-500 text-xs mb-1">Brani completati</p>
+          <p className="font-display text-3xl font-bold text-lime-400">{completed}</p>
+        </div>
+        <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 flex flex-col">
+          <p className="text-zinc-500 text-xs mb-2">Stato avanzamento</p>
+          <ProgressBar value={progress} className="mt-auto" />
+          <p className="text-right text-xs font-mono text-zinc-400 mt-1">{Math.round(progress)}%</p>
+        </div>
+      </div>
+
+      <div className="flex flex-col sm:flex-row gap-3">
+        <button
+          onClick={onAddTrack}
+          className="flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 text-white font-medium px-5 py-3 transition-all"
+        >
+          <Plus size={18} /> Aggiungi nuovo brano
+        </button>
+        <button
+          onClick={onGoLibrary}
+          className="flex items-center justify-center gap-2 rounded-lg border border-zinc-700 hover:border-violet-500 text-zinc-200 font-medium px-5 py-3 transition-colors"
+        >
+          <Library size={18} /> Esplora libreria beat
+        </button>
+      </div>
+
+      <div>
+        <h3 className="font-display font-semibold text-zinc-200 mb-3">Brani dell'EP</h3>
+        {tracks.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-zinc-800 p-8 text-center text-zinc-500">
+            <Music2 size={28} className="mx-auto mb-2 text-zinc-700" />
+            Nessun brano ancora. Aggiungi un beat dalla libreria o crea un nuovo brano per iniziare.
+          </div>
+        ) : (
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {tracks.map((t, i) => {
+              const beat = beats.find((b) => b.id === t.beatId);
+              const song = songs.find((s) => s.id === t.songId);
+              const beatPlaying = playState.id === beat?.id && playState.playing;
+              const songPlaying = playState.id === song?.id && playState.playing;
+              return (
+                <div
+                  key={t.id}
+                  className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4 hover:border-violet-500/50 transition-colors flex flex-col gap-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-xs text-zinc-500">TRACK {i + 1}</span>
+                    <MediaStatusBadge status={trackMediaStatus(t)} />
+                  </div>
+
+                  <button onClick={() => onOpenTrack(t.id)} className="text-left">
+                    <p className="font-display font-semibold text-zinc-100 truncate">{t.title}</p>
+                    <p className="text-xs text-zinc-500 mt-1">
+                      {beat ? `${beat.name} · ${beat.bpm} BPM` : 'Nessun beat selezionato'}
+                    </p>
+                    <p className="text-xs text-zinc-600 mt-1 font-mono">
+                      {t.structure.length} sezioni · {formatTime(trackTotalDuration(t))}
+                    </p>
+                  </button>
+
+                  <div className="flex items-center gap-2 mt-1">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); if (beat?.audioUrl) onTogglePlay(beat); }}
+                      disabled={!beat?.audioUrl}
+                      title={beat ? (beat.audioUrl ? 'Riproduci/pausa beat' : 'Audio del beat non disponibile su questo dispositivo') : 'Nessun beat collegato'}
+                      className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-35 ${
+                        beatPlaying ? 'bg-violet-500/20 border-violet-400 text-lime-300' : 'bg-zinc-800/50 border-zinc-700 text-zinc-300 hover:border-violet-400'
+                      }`}
+                    >
+                      {beatPlaying ? <Pause size={12} /> : <Play size={12} />}
+                      <Disc3 size={12} /> Beat
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); if (song?.audioUrl) onTogglePlay(song); }}
+                      disabled={!song?.audioUrl}
+                      title={song ? (song.audioUrl ? 'Riproduci/pausa canzone' : 'Audio della canzone non disponibile su questo dispositivo') : 'Nessuna canzone collegata'}
+                      className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors disabled:opacity-35 ${
+                        songPlaying ? 'bg-violet-500/20 border-violet-400 text-lime-300' : 'bg-zinc-800/50 border-zinc-700 text-zinc-300 hover:border-violet-400'
+                      }`}
+                    >
+                      {songPlaying ? <Pause size={12} /> : <Play size={12} />}
+                      <Mic2 size={12} /> Canzone
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   UPLOAD CUSTOM BEAT
+   ========================================================================= */
+
+function Field({ label, value, onChange, placeholder, type = 'text' }) {
+  return (
+    <div>
+      <label className="block text-[11px] text-zinc-500 mb-1">{label}</label>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full bg-zinc-950 border border-zinc-800 focus:border-violet-500 outline-none rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600"
+      />
+    </div>
+  );
+}
+
+function UploadMediaForm({ onAdd, onClose, kind = 'beat' }) {
+  const [file, setFile] = useState(null);
+  const [duration, setDuration] = useState(null);
+  const [name, setName] = useState('');
+  const [bpm, setBpm] = useState('');
+  const [key, setKey] = useState('');
+  const [genre, setGenre] = useState('custom');
+  const [mood, setMood] = useState('');
+  const [tags, setTags] = useState('');
+
+  const itemWord = kind === 'song' ? 'canzone' : 'beat';
+
+  const handleFile = (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    setFile(f);
+    setDuration(null);
+    if (!name) setName(f.name.replace(/\.[^/.]+$/, ''));
+    const url = URL.createObjectURL(f);
+    const probe = new Audio();
+    probe.src = url;
+    probe.addEventListener('loadedmetadata', () => setDuration(Math.round(probe.duration)));
+  };
+
+  const handleSubmit = () => {
+    if (!file || !name.trim()) return;
+    const item = {
+      id: uid(),
+      name: name.trim(),
+      bpm: Number(bpm) || 0,
+      key: key.trim() || '—',
+      duration: duration || 0,
+      genre: genre.trim().toLowerCase() || 'custom',
+      mood: mood.trim().toLowerCase() || 'custom',
+      tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
+      notes: '',
+      audioUrl: URL.createObjectURL(file),
+      isCustom: true,
+    };
+    // pass the raw file too, so the caller can persist it in IndexedDB
+    onAdd(item, file);
+    onClose();
+  };
+
+  return (
+    <div className="rounded-xl border border-violet-500/40 bg-zinc-900/80 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="font-display font-semibold text-zinc-100 flex items-center gap-2">
+          <FolderUp size={16} className="text-violet-400" /> Carica una tua {itemWord}
+        </h3>
+        <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
+          <X size={16} />
+        </button>
+      </div>
+
+      <label className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-zinc-700 hover:border-violet-500 rounded-lg p-6 cursor-pointer text-center transition-colors">
+        <Upload size={22} className="text-zinc-500" />
+        <span className="text-sm text-zinc-300">{file ? file.name : 'Scegli un file audio (mp3, wav, m4a...)'}</span>
+        {duration !== null && (
+          <span className="text-xs font-mono text-lime-400">Durata rilevata: {formatTime(duration)}</span>
+        )}
+        <input type="file" accept="audio/*" onChange={handleFile} className="hidden" />
+      </label>
+
+      <div className="grid sm:grid-cols-2 gap-3">
+        <Field label={kind === 'song' ? 'Nome canzone' : 'Nome beat'} value={name} onChange={setName} placeholder={kind === 'song' ? 'Es. La mia canzone' : 'Es. Il mio beat'} />
+        <Field label="BPM" value={bpm} onChange={setBpm} placeholder="Es. 140" type="number" />
+        <Field label="Tonalità" value={key} onChange={setKey} placeholder="Es. F minor" />
+        <Field label="Genere" value={genre} onChange={setGenre} placeholder="Es. trap" />
+        <Field label="Mood" value={mood} onChange={setMood} placeholder="Es. dark" />
+        <Field label="Tag (separati da virgola)" value={tags} onChange={setTags} placeholder="trap, dark, custom" />
+      </div>
+
+      <button
+        onClick={handleSubmit}
+        disabled={!file || !name.trim()}
+        className="flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 disabled:opacity-40 text-white text-sm font-medium px-4 py-2.5 transition-all"
+      >
+        <Plus size={15} /> Aggiungi alla libreria
+      </button>
+    </div>
+  );
+}
+
+/* =========================================================================
+   EDIT BEAT / SONG METADATA
+   ========================================================================= */
+
+function EditMediaForm({ item, onSave, onClose, kind = 'beat' }) {
+  const [name, setName] = useState(item.name || '');
+  const [bpm, setBpm] = useState(item.bpm ?? '');
+  const [key, setKey] = useState(item.key || '');
+  const [genre, setGenre] = useState(item.genre || '');
+  const [mood, setMood] = useState(item.mood || '');
+  const [tags, setTags] = useState((item.tags || []).join(', '));
+
+  const itemWord = kind === 'song' ? 'canzone' : 'beat';
+
+  const handleSave = () => {
+    if (!name.trim()) return;
+    onSave(item.id, {
+      name: name.trim(),
+      bpm: Number(bpm) || 0,
+      key: key.trim() || '—',
+      genre: genre.trim().toLowerCase() || 'custom',
+      mood: mood.trim().toLowerCase() || 'custom',
+      tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
+    });
+    onClose();
+  };
+
+  return (
+    <div className="rounded-xl border border-violet-500/40 bg-zinc-900/80 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="font-display font-semibold text-zinc-100 flex items-center gap-2">
+          <Pencil size={16} className="text-violet-400" /> Modifica {itemWord}
+        </h3>
+        <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
+          <X size={16} />
+        </button>
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-3">
+        <Field label={kind === 'song' ? 'Nome canzone' : 'Nome beat'} value={name} onChange={setName} placeholder={kind === 'song' ? 'Es. La mia canzone' : 'Es. Il mio beat'} />
+        <Field label="BPM" value={bpm} onChange={setBpm} placeholder="Es. 140" type="number" />
+        <Field label="Tonalità" value={key} onChange={setKey} placeholder="Es. F minor" />
+        <Field label="Genere" value={genre} onChange={setGenre} placeholder="Es. trap" />
+        <Field label="Mood" value={mood} onChange={setMood} placeholder="Es. dark" />
+        <Field label="Tag (separati da virgola)" value={tags} onChange={setTags} placeholder="trap, dark, custom" />
+      </div>
+
+      <div className="flex gap-2">
+        <button
+          onClick={handleSave}
+          disabled={!name.trim()}
+          className="flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 disabled:opacity-40 text-white text-sm font-medium px-4 py-2.5 transition-all"
+        >
+          <Check size={15} /> Salva modifiche
+        </button>
+        <button
+          onClick={onClose}
+          className="flex items-center justify-center gap-2 rounded-lg border border-zinc-700 hover:border-zinc-500 text-zinc-300 text-sm font-medium px-4 py-2.5 transition-colors"
+        >
+          Annulla
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   MEDIA LIBRARY (used for both Beats and Songs)
+   ========================================================================= */
+
+function MediaLibrary({ items, onAddToEp, playState, onTogglePlay, onSeek, itemNotes, onNotesChange, onAddCustomItem, onDeleteItem, onEditItem, onAttachAudio, kind = 'beat' }) {
+  const [genre, setGenre] = useState('all');
+  const [bpmRange, setBpmRange] = useState('all');
+  const [mood, setMood] = useState('all');
+  const [uploadOpen, setUploadOpen] = useState(false);
+
+  const isSong = kind === 'song';
+  const itemWord = isSong ? 'canzone' : 'beat';
+  const emptyMsg = isSong ? 'Nessuna canzone corrisponde ai filtri selezionati.' : 'Nessun beat corrisponde ai filtri selezionati.';
+
+  const genres = ['all', ...new Set(items.map((b) => b.genre))];
+  const moods = ['all', ...new Set(items.map((b) => b.mood))];
+
+  const filtered = items.filter((b) => {
+    if (genre !== 'all' && b.genre !== genre) return false;
+    if (mood !== 'all' && b.mood !== mood) return false;
+    if (bpmRange === 'slow' && b.bpm >= 100) return false;
+    if (bpmRange === 'mid' && (b.bpm < 100 || b.bpm > 139)) return false;
+    if (bpmRange === 'fast' && b.bpm < 140) return false;
+    return true;
+  });
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-violet-400 text-xs font-mono uppercase tracking-widest mb-1">Catalogo</p>
+          <h2 className="font-display text-2xl font-bold text-zinc-100">{isSong ? 'Libreria Canzoni' : 'Libreria Beat'}</h2>
+          <p className="text-zinc-500 text-sm mt-1">
+            {isSong
+              ? 'Sfoglia, filtra e gestisci le tue canzoni: demo, idee e riferimenti per l\'EP.'
+              : 'Sfoglia, filtra e scegli i beat per costruire i tuoi brani.'}
+          </p>
+        </div>
+        {!uploadOpen && (
+          <button
+            onClick={() => setUploadOpen(true)}
+            className="flex items-center gap-2 rounded-lg border border-zinc-700 hover:border-violet-500 text-zinc-200 font-medium px-4 py-2 text-sm transition-colors shrink-0"
+          >
+            <FolderUp size={16} /> Carica una tua {itemWord}
+          </button>
+        )}
+      </div>
+
+      {uploadOpen && <UploadMediaForm kind={kind} onAdd={onAddCustomItem} onClose={() => setUploadOpen(false)} />}
+
+      <div className="flex flex-wrap gap-3">
+        <Select label="Genere" value={genre} onChange={setGenre} options={genres} />
+        <Select label="BPM" value={bpmRange} onChange={setBpmRange} options={['all', 'slow', 'mid', 'fast']} labels={{ all: 'Tutti', slow: '< 100', mid: '100–139', fast: '≥ 140' }} />
+        <Select label="Mood" value={mood} onChange={setMood} options={moods} />
+      </div>
+
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {filtered.map((item) => (
+          <BeatCard
+            key={item.id}
+            beat={item}
+            kind={kind}
+            onAddToEp={onAddToEp}
+            playState={playState}
+            onTogglePlay={onTogglePlay}
+            onSeek={onSeek}
+            notesValue={itemNotes[item.id] ?? item.notes}
+            onNotesChange={onNotesChange}
+            onDelete={onDeleteItem}
+            onEdit={onEditItem}
+            onAttachAudio={onAttachAudio}
+          />
+        ))}
+        {filtered.length === 0 && (
+          <div className="col-span-full rounded-xl border border-dashed border-zinc-800 p-8 text-center text-zinc-500">
+            {items.length === 0
+              ? (isSong
+                  ? "Nessuna canzone in libreria. Carica la tua prima canzone per iniziare."
+                  : "Nessun beat in libreria. Carica il tuo primo beat per iniziare.")
+              : emptyMsg}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Select({ label, value, onChange, options, labels }) {
+  return (
+    <div className="relative">
+      <label className="block text-[11px] text-zinc-500 mb-1">{label}</label>
+      <div className="relative">
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="appearance-none bg-zinc-900 border border-zinc-800 hover:border-violet-500/50 rounded-lg pl-3 pr-8 py-2 text-sm text-zinc-200 outline-none focus:border-violet-500 capitalize cursor-pointer"
+        >
+          {options.map((o) => (
+            <option key={o} value={o} className="capitalize">
+              {labels?.[o] ?? (o === 'all' ? 'Tutti' : o)}
+            </option>
+          ))}
+        </select>
+        <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   SONG BUILDER
+   ========================================================================= */
+
+const PX_PER_SECOND = 2.4;
+
+function ArrangementStrip({ track, onUpdateSection, onDuplicateSection, onDeleteSection, onReorder }) {
+  const total = trackTotalDuration(track);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [time, setTime] = useState(0);
+  const dragIndexRef = useRef(null);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    const interval = setInterval(() => {
+      setTime((t) => {
+        const next = t + 0.5; // 0.5s of song time per tick -> fast preview scrub
+        if (next >= total) {
+          setIsPlaying(false);
+          return 0;
+        }
+        return next;
+      });
+    }, 60);
+    return () => clearInterval(interval);
+  }, [isPlaying, total]);
+
+  const togglePlay = () => {
+    if (total === 0) return;
+    setIsPlaying((p) => !p);
+  };
+
+  const playheadPx = (time / Math.max(total, 1)) * (total * PX_PER_SECOND);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <h4 className="font-display font-semibold text-zinc-200 flex items-center gap-2">
+          <Layers size={16} className="text-violet-400" /> Struttura del brano
+        </h4>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={togglePlay}
+            disabled={total === 0}
+            className="flex items-center gap-1.5 rounded-lg bg-zinc-800 hover:bg-violet-500/30 border border-zinc-700 hover:border-violet-400 px-3 py-1.5 text-sm text-zinc-200 disabled:opacity-40 transition-colors"
+          >
+            {isPlaying ? <Pause size={14} /> : <Play size={14} />}
+            Anteprima
+          </button>
+          <span className="font-mono text-xs text-zinc-400">
+            {formatTime(time)} / {formatTime(total)}
+          </span>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 overflow-x-auto">
+        <div className="relative" style={{ minWidth: Math.max(total * PX_PER_SECOND, 320) }}>
+          {/* timeline ruler */}
+          <div className="flex items-end h-2 mb-1.5">
+            {track.structure.map((s) => (
+              <div
+                key={s.id + '_ruler'}
+                style={{ width: Math.max(s.duration * PX_PER_SECOND, 40) }}
+                className="border-l border-zinc-800 h-full first:border-l-0"
+              />
+            ))}
+          </div>
+
+          {/* blocks */}
+          <div className="flex gap-1">
+            {track.structure.map((s, idx) => (
+              <div
+                key={s.id}
+                draggable
+                onDragStart={() => (dragIndexRef.current = idx)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={() => {
+                  if (dragIndexRef.current === null || dragIndexRef.current === idx) return;
+                  onReorder(dragIndexRef.current, idx);
+                  dragIndexRef.current = null;
+                }}
+                style={{ width: Math.max(s.duration * PX_PER_SECOND, 40) }}
+                className={`group relative rounded-md ${sectionColor(s.label)} ${sectionTextColor(s.label)} px-2 py-2 cursor-grab active:cursor-grabbing flex flex-col gap-0.5 min-h-[52px] shadow-sm hover:brightness-110 transition-[filter]`}
+              >
+                <GripVertical size={11} className="absolute top-1 right-1 opacity-50" />
+                <span className="text-[11px] font-semibold leading-tight truncate pr-3">{s.label}</span>
+                <span className="text-[10px] font-mono opacity-80">{formatTime(s.duration)}</span>
+              </div>
+            ))}
+            {track.structure.length === 0 && (
+              <div className="text-zinc-600 text-sm py-4">Nessuna sezione. Aggiungine una qui sotto.</div>
+            )}
+          </div>
+
+          {/* playhead */}
+          {total > 0 && (
+            <div
+              className="absolute top-0 bottom-0 w-px bg-lime-400 shadow-[0_0_8px_rgba(190,255,60,0.8)] transition-[left] duration-75 linear"
+              style={{ left: `${playheadPx}px` }}
+            >
+              <div className="w-2 h-2 rounded-full bg-lime-400 -translate-x-1/2 -mt-1" />
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* section editor list */}
+      <div className="space-y-2">
+        {track.structure.map((s, idx) => (
+          <div key={s.id} className="rounded-lg border border-zinc-800 bg-zinc-900/70 p-3 flex flex-col sm:flex-row sm:items-start gap-3">
+            <div className={`w-2 self-stretch rounded-full ${sectionColor(s.label)} shrink-0`} />
+            <div className="flex-1 grid sm:grid-cols-[1fr_auto] gap-2 items-start">
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    value={s.label}
+                    onChange={(e) => onUpdateSection(idx, { label: e.target.value })}
+                    className="bg-transparent border-b border-zinc-700 focus:border-violet-500 outline-none text-sm font-medium text-zinc-100 w-40"
+                  />
+                  <div className="flex items-center gap-1 text-xs text-zinc-500 font-mono">
+                    <Clock size={12} />
+                    <input
+                      type="number"
+                      min={0}
+                      value={s.duration}
+                      onChange={(e) => onUpdateSection(idx, { duration: Math.max(0, Number(e.target.value)) })}
+                      className="w-14 bg-zinc-950 border border-zinc-800 rounded px-1.5 py-0.5 text-zinc-200 outline-none focus:border-violet-500"
+                    />
+                    sec
+                  </div>
+                </div>
+                <textarea
+                  value={s.notes}
+                  onChange={(e) => onUpdateSection(idx, { notes: e.target.value })}
+                  placeholder="Note personali su questa sezione (testo, melodia, riferimenti)..."
+                  rows={1}
+                  className="resize-none w-full bg-zinc-950 border border-zinc-800 focus:border-violet-500 outline-none rounded-md px-2 py-1.5 text-xs text-zinc-300 placeholder:text-zinc-600"
+                />
+              </div>
+              <div className="flex sm:flex-col gap-1.5 justify-end">
+                <button
+                  onClick={() => onDuplicateSection(idx)}
+                  title="Duplica sezione"
+                  className="p-1.5 rounded-md border border-zinc-700 hover:border-blue-400 hover:text-blue-300 text-zinc-400 transition-colors"
+                >
+                  <Copy size={13} />
+                </button>
+                <button
+                  onClick={() => onDeleteSection(idx)}
+                  title="Elimina sezione"
+                  className="p-1.5 rounded-md border border-zinc-700 hover:border-red-400 hover:text-red-400 text-zinc-400 transition-colors"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SongBuilder({ track, beats, songs, onChangeTitle, onChangeMood, onChangeBeat, onChangeSong, onChangeLyrics, onUpdateStructure, onAddToEp, playState, onTogglePlay, onSeek, onAttachAudio, beatNotes, onNotesChange, songNotes, onNotesChangeSong }) {
+  const [pickerOpen, setPickerOpen] = useState(!track?.beatId);
+  const [songPickerOpen, setSongPickerOpen] = useState(false);
+
+  if (!track) {
+    return (
+      <div className="rounded-xl border border-dashed border-zinc-800 p-10 text-center text-zinc-500">
+        <Layers size={28} className="mx-auto mb-2 text-zinc-700" />
+        Nessun brano selezionato. Vai alla Dashboard o all'EP Tracker per scegliere o creare un brano.
+      </div>
+    );
+  }
+
+  const beat = beats.find((b) => b.id === track.beatId);
+  const song = songs.find((s) => s.id === track.songId);
+
+  const updateSection = (idx, patch) => {
+    const structure = track.structure.map((s, i) => (i === idx ? { ...s, ...patch } : s));
+    onUpdateStructure(structure);
+  };
+  const duplicateSection = (idx) => {
+    const item = { ...track.structure[idx], id: uid() };
+    const structure = [...track.structure];
+    structure.splice(idx + 1, 0, item);
+    onUpdateStructure(structure);
+  };
+  const deleteSection = (idx) => {
+    onUpdateStructure(track.structure.filter((_, i) => i !== idx));
+  };
+  const reorder = (from, to) => onUpdateStructure(moveItem(track.structure, from, to));
+  const addSection = (type) => {
+    const count = track.structure.filter((s) => s.label.startsWith(type)).length;
+    const label = type === 'Hook' || type === 'Verse' || type === 'Bridge' ? `${type} ${count + 1}` : type;
+    onUpdateStructure([...track.structure, { id: uid(), label, duration: DEFAULT_DURATIONS[type] ?? 15, notes: '' }]);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <p className="text-violet-400 text-xs font-mono uppercase tracking-widest mb-1">Song Builder</p>
+        <input
+          value={track.title}
+          onChange={(e) => onChangeTitle(e.target.value)}
+          className="font-display text-2xl font-bold bg-transparent border-b-2 border-transparent focus:border-violet-500 outline-none text-zinc-100 w-full"
+          placeholder="Titolo del brano"
+        />
+      </div>
+
+      {/* Beat selection */}
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h4 className="font-display font-semibold text-zinc-200 flex items-center gap-2">
+            <Disc3 size={16} className="text-violet-400" /> Beat selezionato
+          </h4>
+          {beat && (
+            <button onClick={() => setPickerOpen((v) => !v)} className="text-xs text-violet-300 hover:text-lime-300 transition-colors">
+              {pickerOpen ? 'Chiudi selezione' : 'Cambia beat'}
+            </button>
+          )}
+        </div>
+
+        {beat && !pickerOpen ? (
+          <div className="flex flex-wrap items-center gap-4">
+            <button
+              onClick={() => onTogglePlay(beat)}
+              disabled={!beat.audioUrl}
+              title={beat.audioUrl ? 'Riproduci/pausa beat' : 'Audio non disponibile su questo dispositivo'}
+              className="flex items-center justify-center w-12 h-12 rounded-lg bg-gradient-to-br from-violet-500/30 to-blue-500/30 border border-zinc-700 hover:border-violet-400 disabled:opacity-40 transition-colors shrink-0"
+            >
+              {playState.id === beat.id && playState.playing ? (
+                <Pause size={20} className="text-lime-300" />
+              ) : (
+                <Play size={20} className="text-violet-300" />
+              )}
+            </button>
+            <div>
+              <p className="font-semibold text-zinc-100">{beat.name}</p>
+              <p className="text-xs text-zinc-500 font-mono">{beat.bpm} BPM · {beat.key} · {formatTime(beat.duration)}</p>
+            </div>
+            <div className="flex flex-wrap gap-1.5 ml-auto">
+              {beat.tags.map((t) => (
+                <Pill key={t} className={GENRE_COLORS[beat.genre] || 'bg-zinc-700/40 text-zinc-300 border-zinc-600'}>{t}</Pill>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {beats.map((b) => (
+              <BeatCard
+                key={b.id}
+                beat={b}
+                compact
+                onAddToEp={() => { onChangeBeat(b.id); setPickerOpen(false); }}
+                playState={playState}
+                onTogglePlay={onTogglePlay}
+                onSeek={onSeek}
+                onAttachAudio={onAttachAudio}
+                notesValue={beatNotes[b.id] ?? b.notes}
+                onNotesChange={onNotesChange}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Reference song selection */}
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h4 className="font-display font-semibold text-zinc-200 flex items-center gap-2">
+            <Mic2 size={16} className="text-violet-400" /> Canzone di riferimento
+            <span className="text-[11px] font-normal text-zinc-500">(opzionale)</span>
+          </h4>
+          <div className="flex items-center gap-3">
+            {song && (
+              <button onClick={() => onChangeSong(null)} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-red-400 transition-colors">
+                <Link2Off size={12} /> Rimuovi
+              </button>
+            )}
+            <button onClick={() => setSongPickerOpen((v) => !v)} className="text-xs text-violet-300 hover:text-lime-300 transition-colors">
+              {songPickerOpen ? 'Chiudi selezione' : song ? 'Cambia canzone' : 'Scegli canzone'}
+            </button>
+          </div>
+        </div>
+
+        {song && !songPickerOpen ? (
+          <div className="flex flex-wrap items-center gap-4">
+            <button
+              onClick={() => onTogglePlay(song)}
+              disabled={!song.audioUrl}
+              title={song.audioUrl ? 'Riproduci/pausa canzone' : 'Audio non disponibile su questo dispositivo'}
+              className="flex items-center justify-center w-12 h-12 rounded-lg bg-gradient-to-br from-violet-500/30 to-blue-500/30 border border-zinc-700 hover:border-violet-400 disabled:opacity-40 transition-colors shrink-0"
+            >
+              {playState.id === song.id && playState.playing ? (
+                <Pause size={20} className="text-lime-300" />
+              ) : (
+                <Play size={20} className="text-violet-300" />
+              )}
+            </button>
+            <div>
+              <p className="font-semibold text-zinc-100">{song.name}</p>
+              <p className="text-xs text-zinc-500 font-mono">{song.bpm} BPM · {song.key} · {formatTime(song.duration)}</p>
+            </div>
+            <div className="flex flex-wrap gap-1.5 ml-auto">
+              {song.tags.map((t) => (
+                <Pill key={t} className={GENRE_COLORS[song.genre] || 'bg-zinc-700/40 text-zinc-300 border-zinc-600'}>{t}</Pill>
+              ))}
+            </div>
+          </div>
+        ) : songPickerOpen ? (
+          songs.length === 0 ? (
+            <p className="text-sm text-zinc-500">Nessuna canzone in libreria. Caricane una dalla Libreria Canzoni.</p>
+          ) : (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {songs.map((s) => (
+                <BeatCard
+                  key={s.id}
+                  beat={s}
+                  kind="song"
+                  compact
+                  onAddToEp={() => { onChangeSong(s.id); setSongPickerOpen(false); }}
+                  playState={playState}
+                  onTogglePlay={onTogglePlay}
+                  onSeek={onSeek}
+                  onAttachAudio={onAttachAudio}
+                  notesValue={songNotes[s.id] ?? s.notes}
+                  onNotesChange={onNotesChangeSong}
+                />
+              ))}
+            </div>
+          )
+        ) : (
+          <p className="text-sm text-zinc-500">Nessuna canzone collegata a questo brano.</p>
+        )}
+      </div>
+
+      {/* Mood tag */}
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4">
+        <h4 className="font-display font-semibold text-zinc-200 mb-3 flex items-center gap-2">
+          <Sparkles size={16} className="text-violet-400" /> Mood del brano
+        </h4>
+        <div className="flex flex-wrap gap-2">
+          {MOOD_OPTIONS.map((m) => (
+            <button
+              key={m}
+              onClick={() => onChangeMood(track.mood === m ? '' : m)}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium border capitalize transition-colors ${
+                track.mood === m
+                  ? 'bg-lime-400 text-zinc-900 border-lime-400'
+                  : 'bg-zinc-800/50 text-zinc-400 border-zinc-700 hover:border-violet-400 hover:text-zinc-200'
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Lyrics */}
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4">
+        <h4 className="font-display font-semibold text-zinc-200 mb-3 flex items-center gap-2">
+          <FileText size={16} className="text-violet-400" /> Testo del brano
+        </h4>
+        <textarea
+          value={track.lyrics || ''}
+          onChange={(e) => onChangeLyrics(e.target.value)}
+          placeholder={'Scrivi qui il testo del brano...\n\n[Intro]\n...\n\n[Verse 1]\n...\n\n[Hook]\n...'}
+          rows={10}
+          className="w-full resize-y rounded-lg bg-zinc-950 border border-zinc-800 focus:border-violet-500 outline-none text-sm text-zinc-200 p-3 placeholder:text-zinc-600 font-mono leading-relaxed"
+        />
+      </div>
+
+      {/* Arrangement */}
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4">
+        <ArrangementStrip
+          track={track}
+          onUpdateSection={updateSection}
+          onDuplicateSection={duplicateSection}
+          onDeleteSection={deleteSection}
+          onReorder={reorder}
+        />
+
+        <div className="mt-4">
+          <p className="text-xs text-zinc-500 mb-2">Aggiungi sezione</p>
+          <div className="flex flex-wrap gap-2">
+            {SECTION_TYPE_OPTIONS.map((type) => (
+              <button
+                key={type}
+                onClick={() => addSection(type)}
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-zinc-200 border border-zinc-700 hover:border-violet-400 hover:bg-zinc-800 transition-colors`}
+              >
+                <span className={`w-2 h-2 rounded-full ${sectionColor(type)}`} />
+                <Plus size={11} /> {type}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   EP TRACKER
+   ========================================================================= */
+
+function EPTracker({ tracks, beats, songs, onReorder, onOpenTrack, onDeleteTrack, onAddTrack }) {
+  const dragIndexRef = useRef(null);
+  const completed = tracks.filter(trackIsComplete).length;
+  const progress = tracks.length ? (completed / tracks.length) * 100 : 0;
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <p className="text-violet-400 text-xs font-mono uppercase tracking-widest mb-1">Tracklist</p>
+        <h2 className="font-display text-2xl font-bold text-zinc-100">EP Tracker</h2>
+        <p className="text-zinc-500 text-sm mt-1">Riordina i brani, controlla lo stato e gestisci la tua tracklist.</p>
+      </div>
+
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-4">
+        <div className="flex justify-between text-sm text-zinc-300 mb-2">
+          <span>Avanzamento complessivo</span>
+          <span className="font-mono text-lime-400">{completed}/{tracks.length} completati</span>
+        </div>
+        <ProgressBar value={progress} />
+      </div>
+
+      <div className="space-y-2">
+        {tracks.map((t, idx) => {
+          const beat = beats.find((b) => b.id === t.beatId);
+          const song = songs.find((s) => s.id === t.songId);
+          return (
+            <div
+              key={t.id}
+              draggable
+              onDragStart={() => (dragIndexRef.current = idx)}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={() => {
+                if (dragIndexRef.current === null || dragIndexRef.current === idx) return;
+                onReorder(dragIndexRef.current, idx);
+                dragIndexRef.current = null;
+              }}
+              className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-3 flex items-center gap-3 hover:border-violet-500/40 transition-colors cursor-grab active:cursor-grabbing"
+            >
+              <GripVertical size={16} className="text-zinc-600 shrink-0" />
+              <span className="font-mono text-xs text-zinc-500 w-6 text-center shrink-0">{idx + 1}</span>
+
+              {/* mini structure preview */}
+              <div className="hidden sm:flex h-6 rounded overflow-hidden shrink-0 w-32 border border-zinc-800">
+                {t.structure.length === 0 ? (
+                  <div className="w-full bg-zinc-800" />
+                ) : (
+                  t.structure.map((s) => (
+                    <div
+                      key={s.id}
+                      className={sectionColor(s.label)}
+                      style={{ width: `${(s.duration / Math.max(trackTotalDuration(t), 1)) * 100}%` }}
+                    />
+                  ))
+                )}
+              </div>
+
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-zinc-100 truncate">{t.title}</p>
+                <p className="text-xs text-zinc-500 truncate">
+                  {beat ? `${beat.name} · ${beat.bpm} BPM` : 'Nessun beat'} · {t.structure.length} sezioni · {formatTime(trackTotalDuration(t))}
+                  {t.mood && <span className="capitalize"> · {t.mood}</span>}
+                  {song && <span> · ref: {song.name}</span>}
+                </p>
+              </div>
+
+              <StatusBadge complete={trackIsComplete(t)} />
+
+              <button onClick={() => onOpenTrack(t.id)} className="p-2 rounded-md border border-zinc-700 hover:border-violet-400 hover:text-violet-300 text-zinc-400 transition-colors shrink-0">
+                <Pencil size={14} />
+              </button>
+              <button onClick={() => onDeleteTrack(t.id)} className="p-2 rounded-md border border-zinc-700 hover:border-red-400 hover:text-red-400 text-zinc-400 transition-colors shrink-0">
+                <Trash2 size={14} />
+              </button>
+            </div>
+          );
+        })}
+
+        {tracks.length === 0 && (
+          <div className="rounded-xl border border-dashed border-zinc-800 p-8 text-center text-zinc-500">
+            Nessun brano nell'EP. Aggiungine uno dalla libreria beat.
+          </div>
+        )}
+      </div>
+
+      <button
+        onClick={onAddTrack}
+        className="flex items-center justify-center gap-2 rounded-lg border border-zinc-700 hover:border-violet-500 text-zinc-200 font-medium px-5 py-3 transition-colors w-full sm:w-auto"
+      >
+        <Plus size={18} /> Aggiungi nuovo brano
+      </button>
+    </div>
+  );
+}
+
+/* =========================================================================
+   EXPORT VIEW
+   ========================================================================= */
+
+function ExportView({ epTitle, tracks, beats, songs }) {
+  const totalRuntime = tracks.reduce((sum, t) => sum + trackTotalDuration(t), 0);
+
+  const buildPayload = () => ({
+    epTitle,
+    exportedAt: new Date().toISOString(),
+    trackCount: tracks.length,
+    totalRuntimeSeconds: totalRuntime,
+    tracks: tracks.map((t, i) => {
+      const beat = beats.find((b) => b.id === t.beatId);
+      const song = songs.find((s) => s.id === t.songId);
+      return {
+        order: i + 1,
+        title: t.title,
+        mood: t.mood || null,
+        status: trackIsComplete(t) ? 'complete' : 'in_progress',
+        beat: beat
+          ? { name: beat.name, bpm: beat.bpm, key: beat.key, duration: beat.duration, genre: beat.genre, tags: beat.tags }
+          : null,
+        referenceSong: song
+          ? { name: song.name, bpm: song.bpm, key: song.key, duration: song.duration, genre: song.genre, tags: song.tags }
+          : null,
+        structure: t.structure.map((s) => ({ section: s.label, duration: s.duration, notes: s.notes })),
+        lyrics: t.lyrics || null,
+        totalDuration: trackTotalDuration(t),
+      };
+    }),
+  });
+
+  const downloadJSON = () => {
+    const blob = new Blob([JSON.stringify(buildPayload(), null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${epTitle.replace(/\s+/g, '_').toLowerCase()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const printSummary = () => window.print();
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <p className="text-violet-400 text-xs font-mono uppercase tracking-widest mb-1">Finalizzazione</p>
+        <h2 className="font-display text-2xl font-bold text-zinc-100">Export EP</h2>
+        <p className="text-zinc-500 text-sm mt-1">Esporta la tracklist completa in JSON o stampala come riepilogo PDF.</p>
+      </div>
+
+      <div className="flex flex-wrap gap-3">
+        <button
+          onClick={downloadJSON}
+          className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 text-white font-medium px-5 py-3 transition-all"
+        >
+          <FileJson size={18} /> Esporta JSON
+        </button>
+        <button
+          onClick={printSummary}
+          className="flex items-center gap-2 rounded-lg border border-zinc-700 hover:border-violet-500 text-zinc-200 font-medium px-5 py-3 transition-colors"
+        >
+          <Printer size={18} /> Stampa / Salva come PDF
+        </button>
+      </div>
+
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-5 space-y-5">
+        <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
+          <div>
+            <h3 className="font-display text-xl font-bold text-zinc-100">{epTitle}</h3>
+            <p className="text-xs text-zinc-500 mt-1">{tracks.length} brani · durata totale {formatTime(totalRuntime)}</p>
+          </div>
+          <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-violet-500 to-lime-400 flex items-center justify-center shrink-0">
+            <Music2 size={20} className="text-zinc-950" />
+          </div>
+        </div>
+
+        {tracks.map((t, i) => {
+          const beat = beats.find((b) => b.id === t.beatId);
+          const song = songs.find((s) => s.id === t.songId);
+          return (
+            <div key={t.id} className="border-b border-zinc-800/60 pb-4 last:border-b-0 last:pb-0">
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+                <h4 className="font-display font-semibold text-zinc-100">
+                  {i + 1}. {t.title}
+                </h4>
+                <StatusBadge complete={trackIsComplete(t)} />
+              </div>
+              {beat ? (
+                <p className="text-xs text-zinc-400 font-mono mb-2">
+                  Beat: {beat.name} · {beat.bpm} BPM · {beat.key} {t.mood && `· mood: ${t.mood}`}
+                </p>
+              ) : (
+                <p className="text-xs text-zinc-500 mb-2">Nessun beat assegnato</p>
+              )}
+              {song && (
+                <p className="text-xs text-zinc-400 font-mono mb-2">
+                  Rif. canzone: {song.name} · {song.bpm} BPM · {song.key}
+                </p>
+              )}
+              <div className="flex flex-wrap gap-1.5">
+                {t.structure.map((s) => (
+                  <Pill key={s.id} className="bg-zinc-800/60 text-zinc-300 border-zinc-700">
+                    {s.label} · {formatTime(s.duration)}
+                  </Pill>
+                ))}
+              </div>
+              {t.lyrics && t.lyrics.trim() && (
+                <details className="mt-2">
+                  <summary className="text-xs text-violet-300 cursor-pointer hover:text-lime-300 transition-colors">Mostra testo</summary>
+                  <pre className="mt-2 whitespace-pre-wrap text-xs text-zinc-300 font-mono bg-zinc-950 border border-zinc-800 rounded-lg p-3">{t.lyrics}</pre>
+                </details>
+              )}
+            </div>
+          );
+        })}
+
+        {tracks.length === 0 && <p className="text-zinc-500 text-sm">L'EP è ancora vuoto.</p>}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   APP ROOT
+   ========================================================================= */
+
+function App() {
+  const [epTitle, setEpTitle] = useState('Echoes EP');
+  const [activeView, setActiveView] = useState('dashboard');
+  const [selectedTrackId, setSelectedTrackId] = useState('seed1');
+  const [beatNotes, setBeatNotes] = useState({});
+  const [songNotes, setSongNotes] = useState({});
+  const [lastSaved, setLastSaved] = useState('ora');
+  const [saveError, setSaveError] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [customBeats, setCustomBeats] = useState([]);
+  const [customSongs, setCustomSongs] = useState([]);
+  const [storageMode] = useState(hasSharedStorage ? 'shared' : 'local');
+  const [syncing, setSyncing] = useState(false);
+
+  const allBeats = [...MOCK_BEATS, ...customBeats];
+  const allSongs = [...MOCK_SONGS, ...customSongs];
+
+  const [tracks, setTracks] = useState(() => [
+    {
+      id: 'seed1',
+      title: 'Lost Frequencies',
+      beatId: 'rako1',
+      songId: null,
+      mood: 'dark',
+      lyrics: '',
+      structure: newStructure(),
+    },
+  ]);
+
+  // audio preview state — a single shared <audio> element is reused for every
+  // beat/song; positionsRef remembers the last known playback position (in
+  // seconds) per item id, so pausing or switching away never loses the spot.
+  const [playState, setPlayState] = useState({ id: null, playing: false, progress: 0 });
+  const playIntervalRef = useRef(null);
+  const audioRef = useRef(null);
+  const positionsRef = useRef({});
+  const lastLocalEditAtRef = useRef(0);
+  const savedAtRef = useRef(0);
+
+  // Re-hydrate custom beats/songs metadata with whatever audio Blobs this
+  // browser actually has stored locally (audio is never synced via shared
+  // storage — only the metadata is).
+  const hydrateMediaWithLocalAudio = async (saved) => {
+    if (typeof saved.epTitle === 'string') setEpTitle(saved.epTitle);
+    if (Array.isArray(saved.tracks)) {
+      setTracks(saved.tracks.map((t) => ({ songId: null, lyrics: '', ...t })));
+    }
+    if (saved.beatNotes) setBeatNotes(saved.beatNotes);
+    if (saved.songNotes) setSongNotes(saved.songNotes);
+
+    if (Array.isArray(saved.customBeats)) {
+      const restored = await Promise.all(
+        saved.customBeats.map(async (b) => {
+          try {
+            const blob = await idbGet('audio', 'beat_' + b.id);
+            return { ...b, audioUrl: blob ? URL.createObjectURL(blob) : null };
+          } catch {
+            return { ...b, audioUrl: null };
+          }
+        })
+      );
+      setCustomBeats(restored);
+    }
+
+    if (Array.isArray(saved.customSongs)) {
+      const restored = await Promise.all(
+        saved.customSongs.map(async (s) => {
+          try {
+            const blob = await idbGet('audio', 'song_' + s.id);
+            return { ...s, audioUrl: blob ? URL.createObjectURL(blob) : null };
+          } catch {
+            return { ...s, audioUrl: null };
+          }
+        })
+      );
+      setCustomSongs(restored);
+    }
+  };
+
+  /* ---------------------------------------------------------------------
+     Load the saved project on first mount — from shared storage if this is
+     running as a Claude artifact (so collaborators see the same project),
+     otherwise from this browser's IndexedDB.
+     --------------------------------------------------------------------- */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const saved = await loadProjectData();
+        if (saved && !cancelled) {
+          await hydrateMediaWithLocalAudio(saved);
+          savedAtRef.current = saved.savedAt || 0;
+        }
+      } catch (err) {
+        console.warn('Impossibile caricare il progetto salvato:', err);
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /* ---------------------------------------------------------------------
+     Autosave whenever the project changes (debounced so rapid edits don't
+     trigger a write per keystroke). Goes to shared storage when available,
+     otherwise to this browser's IndexedDB.
+     --------------------------------------------------------------------- */
+  useEffect(() => {
+    if (!hydrated) return;
+    lastLocalEditAtRef.current = Date.now();
+    const t = setTimeout(() => {
+      const savedAt = Date.now();
+      saveProjectData({
+        epTitle,
+        tracks,
+        beatNotes,
+        songNotes,
+        customBeats: customBeats.map(stripAudioUrl),
+        customSongs: customSongs.map(stripAudioUrl),
+        savedAt,
+      })
+        .then(() => {
+          savedAtRef.current = savedAt;
+          setLastSaved('ora');
+          setSaveError(false);
+        })
+        .catch((err) => {
+          console.warn('Salvataggio non riuscito:', err);
+          setSaveError(true);
+        });
+    }, 500);
+    return () => clearTimeout(t);
+  }, [epTitle, tracks, beatNotes, songNotes, customBeats, customSongs, hydrated]);
+
+  /* ---------------------------------------------------------------------
+     Collaborative sync: when running in shared mode, periodically check
+     whether a collaborator saved a newer version, and pull it in — but
+     never while there's a local edit in flight (avoids clobbering what
+     you're typing).
+     --------------------------------------------------------------------- */
+  const pullRemote = async (force = false) => {
+    if (!hasSharedStorage) return;
+    try {
+      const remote = await loadProjectData();
+      if (!remote) return;
+      const remoteSavedAt = remote.savedAt || 0;
+      const recentLocalEdit = Date.now() - lastLocalEditAtRef.current < 4000;
+      if (remoteSavedAt > savedAtRef.current && (force || !recentLocalEdit)) {
+        await hydrateMediaWithLocalAudio(remote);
+        savedAtRef.current = remoteSavedAt;
+        setLastSaved('ora (da un collaboratore)');
+      }
+    } catch (err) {
+      console.warn('Sincronizzazione con il progetto condiviso non riuscita:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (!hydrated || !hasSharedStorage) return;
+    const interval = setInterval(() => pullRemote(false), 10000);
+    const onFocus = () => pullRemote(false);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+  }, [hydrated]);
+
+  const handleManualSync = async () => {
+    if (!hasSharedStorage) return;
+    setSyncing(true);
+    await pullRemote(true);
+    setSyncing(false);
+  };
+
+  /* ---------------------------------------------------------------------
+     Playback: pausing keeps the position (no reset to 0); clicking a point
+     on the seek bar moves the position there, ready for the next play.
+     --------------------------------------------------------------------- */
+  const togglePlay = (item) => {
+    const isCurrent = playState.id === item.id;
+
+    // Pause: remember exactly where we were.
+    if (isCurrent && playState.playing) {
+      clearInterval(playIntervalRef.current);
+      if (audioRef.current && item.audioUrl) {
+        positionsRef.current[item.id] = audioRef.current.currentTime;
+        audioRef.current.pause();
+      } else {
+        positionsRef.current[item.id] = (playState.progress / 100) * (item.duration || 0);
+      }
+      setPlayState((prev) => ({ ...prev, playing: false }));
+      return;
+    }
+
+    // Switching away from whatever else was playing: save its position too.
+    if (playState.id && playState.id !== item.id && audioRef.current) {
+      positionsRef.current[playState.id] = audioRef.current.currentTime;
+      audioRef.current.pause();
+    }
+    clearInterval(playIntervalRef.current);
+
+    const startSeconds = positionsRef.current[item.id] || 0;
+
+    if (item.audioUrl) {
+      const audio = audioRef.current;
+      if (!isCurrent) audio.src = item.audioUrl;
+      audio.currentTime = startSeconds;
+      audio.play();
+      setPlayState({ id: item.id, playing: true, progress: item.duration ? (startSeconds / item.duration) * 100 : 0 });
+      return;
+    }
+
+    // No local audio file available — simulate a sped-up preview from the
+    // remembered position (used e.g. for items a collaborator hasn't
+    // attached locally yet).
+    const stepMs = 80;
+    const totalSteps = Math.max((item.duration * 1000) / stepMs / 6, 1);
+    let step = (startSeconds / Math.max(item.duration, 1)) * totalSteps;
+    setPlayState({ id: item.id, playing: true, progress: (step / totalSteps) * 100 });
+    playIntervalRef.current = setInterval(() => {
+      step += 1;
+      const pct = (step / totalSteps) * 100;
+      if (pct >= 100) {
+        clearInterval(playIntervalRef.current);
+        positionsRef.current[item.id] = 0;
+        setPlayState({ id: null, playing: false, progress: 0 });
+        return;
+      }
+      positionsRef.current[item.id] = (pct / 100) * item.duration;
+      setPlayState({ id: item.id, playing: true, progress: pct });
+    }, stepMs);
+  };
+
+  const seekTo = (item, fraction) => {
+    const newTime = fraction * (item.duration || 0);
+    positionsRef.current[item.id] = newTime;
+
+    if (playState.id === item.id) {
+      if (audioRef.current && item.audioUrl) audioRef.current.currentTime = newTime;
+      setPlayState((prev) => ({ ...prev, progress: fraction * 100 }));
+      return;
+    }
+
+    // Seeking on an item that wasn't active: load it paused at that spot,
+    // so the next press of play starts exactly there.
+    if (audioRef.current && playState.id) {
+      positionsRef.current[playState.id] = audioRef.current.currentTime;
+      audioRef.current.pause();
+    }
+    clearInterval(playIntervalRef.current);
+    if (audioRef.current && item.audioUrl) {
+      audioRef.current.src = item.audioUrl;
+      audioRef.current.currentTime = newTime;
+    }
+    setPlayState({ id: item.id, playing: false, progress: fraction * 100 });
+  };
+
+  const handleAudioTimeUpdate = () => {
+    const audio = audioRef.current;
+    if (!audio || !audio.duration) return;
+    setPlayState((prev) => {
+      if (!prev.playing) return prev;
+      if (prev.id) positionsRef.current[prev.id] = audio.currentTime;
+      return { ...prev, progress: (audio.currentTime / audio.duration) * 100 };
+    });
+  };
+
+  const handleAudioEnded = () => {
+    setPlayState((prev) => {
+      if (prev.id) positionsRef.current[prev.id] = 0;
+      return { id: null, playing: false, progress: 0 };
+    });
+  };
+
+  useEffect(
+    () => () => {
+      clearInterval(playIntervalRef.current);
+      if (audioRef.current) audioRef.current.pause();
+    },
+    []
+  );
+
+  const handleNotesChange = (beatId, value) => setBeatNotes((prev) => ({ ...prev, [beatId]: value }));
+  const handleNotesChangeSong = (songId, value) => setSongNotes((prev) => ({ ...prev, [songId]: value }));
+
+  const handleAddCustomBeat = (beat, file) => {
+    setCustomBeats((prev) => [...prev, beat]);
+    if (file) {
+      idbSet('audio', 'beat_' + beat.id, file).catch((err) =>
+        console.warn('Impossibile salvare il file audio del beat in locale:', err)
+      );
+    }
+  };
+
+  const handleAddCustomSong = (song, file) => {
+    setCustomSongs((prev) => [...prev, song]);
+    if (file) {
+      idbSet('audio', 'song_' + song.id, file).catch((err) =>
+        console.warn('Impossibile salvare il file audio della canzone in locale:', err)
+      );
+    }
+  };
+
+  const handleEditBeat = (beatId, patch) => {
+    setCustomBeats((prev) => prev.map((b) => (b.id === beatId ? { ...b, ...patch } : b)));
+  };
+
+  const handleEditSong = (songId, patch) => {
+    setCustomSongs((prev) => prev.map((s) => (s.id === songId ? { ...s, ...patch } : s)));
+  };
+
+  // Lets a collaborator attach their own local copy of a beat/song's audio
+  // when the metadata is shared but the actual file isn't on their device.
+  const handleAttachAudio = (item, file) => {
+    const url = URL.createObjectURL(file);
+    const isBeat = customBeats.some((b) => b.id === item.id);
+    if (isBeat) {
+      setCustomBeats((prev) => prev.map((b) => (b.id === item.id ? { ...b, audioUrl: url } : b)));
+      idbSet('audio', 'beat_' + item.id, file).catch((err) => console.warn('Impossibile salvare il file audio in locale:', err));
+    } else {
+      setCustomSongs((prev) => prev.map((s) => (s.id === item.id ? { ...s, audioUrl: url } : s)));
+      idbSet('audio', 'song_' + item.id, file).catch((err) => console.warn('Impossibile salvare il file audio in locale:', err));
+    }
+  };
+
+  const handleDeleteCustomBeat = (beatId) => {
+    setCustomBeats((prev) => {
+      const target = prev.find((b) => b.id === beatId);
+      if (target?.audioUrl) URL.revokeObjectURL(target.audioUrl);
+      return prev.filter((b) => b.id !== beatId);
+    });
+    setTracks((prev) => prev.map((t) => (t.beatId === beatId ? { ...t, beatId: null } : t)));
+    idbDelete('audio', 'beat_' + beatId).catch(() => {});
+    delete positionsRef.current[beatId];
+    if (playState.id === beatId) {
+      clearInterval(playIntervalRef.current);
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+      }
+      setPlayState({ id: null, playing: false, progress: 0 });
+    }
+  };
+
+  const handleDeleteCustomSong = (songId) => {
+    setCustomSongs((prev) => {
+      const target = prev.find((s) => s.id === songId);
+      if (target?.audioUrl) URL.revokeObjectURL(target.audioUrl);
+      return prev.filter((s) => s.id !== songId);
+    });
+    setTracks((prev) => prev.map((t) => (t.songId === songId ? { ...t, songId: null } : t)));
+    idbDelete('audio', 'song_' + songId).catch(() => {});
+    delete positionsRef.current[songId];
+    if (playState.id === songId) {
+      clearInterval(playIntervalRef.current);
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+      }
+      setPlayState({ id: null, playing: false, progress: 0 });
+    }
+  };
+
+  const handleAddToEp = (beat) => {
+    const t = newTrack(beat.id);
+    t.title = beat.name;
+    setTracks((prev) => [...prev, t]);
+    setSelectedTrackId(t.id);
+    setActiveView('builder');
+  };
+
+  const handleAddSongToEp = (song) => {
+    const t = newTrack(null, song.id);
+    t.title = song.name;
+    setTracks((prev) => [...prev, t]);
+    setSelectedTrackId(t.id);
+    setActiveView('builder');
+  };
+
+  const handleAddBlankTrack = () => {
+    const t = newTrack(null);
+    t.title = `Brano ${tracks.length + 1}`;
+    setTracks((prev) => [...prev, t]);
+    setSelectedTrackId(t.id);
+    setActiveView('builder');
+  };
+
+  const handleOpenTrack = (id) => {
+    setSelectedTrackId(id);
+    setActiveView('builder');
+  };
+
+  const handleDeleteTrack = (id) => {
+    setTracks((prev) => prev.filter((t) => t.id !== id));
+    if (selectedTrackId === id) setSelectedTrackId(null);
+  };
+
+  const handleReorderTracks = (from, to) => setTracks((prev) => moveItem(prev, from, to));
+
+  const selectedTrack = tracks.find((t) => t.id === selectedTrackId) || null;
+
+  const updateSelectedTrack = (patch) => {
+    setTracks((prev) => prev.map((t) => (t.id === selectedTrackId ? { ...t, ...patch } : t)));
+  };
+
+  const completed = tracks.filter(trackIsComplete).length;
+  const progress = tracks.length ? (completed / tracks.length) * 100 : 0;
+
+  if (!hydrated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-zinc-400">
+        <style>{`
+          @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+          .font-display { font-family: 'Space Grotesk', sans-serif; }
+          body, .font-body { font-family: 'Inter', sans-serif; }
+        `}</style>
+        <div className="flex flex-col items-center gap-3 font-body">
+          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-500 to-lime-400 flex items-center justify-center animate-pulse">
+            <Music2 size={20} className="text-zinc-950" />
+          </div>
+          <p className="text-sm">Caricamento del progetto salvato…</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-screen bg-zinc-950 text-zinc-200">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+        .font-display { font-family: 'Space Grotesk', sans-serif; }
+        body, .font-body { font-family: 'Inter', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+      `}</style>
+
+      <audio ref={audioRef} onTimeUpdate={handleAudioTimeUpdate} onEnded={handleAudioEnded} className="hidden" />
+
+      <Sidebar activeView={activeView} setActiveView={setActiveView} />
+
+      <div className="flex-1 flex flex-col min-w-0 pb-16 md:pb-0">
+        <TopBar
+          epTitle={epTitle}
+          setEpTitle={setEpTitle}
+          progress={progress}
+          lastSaved={lastSaved}
+          saveError={saveError}
+          storageMode={storageMode}
+          syncing={syncing}
+          onSync={handleManualSync}
+        />
+
+        <main className="flex-1 px-4 md:px-8 py-6 max-w-5xl w-full mx-auto font-body">
+          {activeView === 'dashboard' && (
+            <Dashboard
+              epTitle={epTitle}
+              tracks={tracks}
+              beats={allBeats}
+              songs={allSongs}
+              onAddTrack={handleAddBlankTrack}
+              onOpenTrack={handleOpenTrack}
+              onGoLibrary={() => setActiveView('library')}
+              playState={playState}
+              onTogglePlay={togglePlay}
+            />
+          )}
+
+          {activeView === 'library' && (
+            <MediaLibrary
+              kind="beat"
+              items={allBeats}
+              onAddToEp={handleAddToEp}
+              playState={playState}
+              onTogglePlay={togglePlay}
+              onSeek={seekTo}
+              itemNotes={beatNotes}
+              onNotesChange={handleNotesChange}
+              onAddCustomItem={handleAddCustomBeat}
+              onDeleteItem={handleDeleteCustomBeat}
+              onEditItem={handleEditBeat}
+              onAttachAudio={handleAttachAudio}
+            />
+          )}
+
+          {activeView === 'songLibrary' && (
+            <MediaLibrary
+              kind="song"
+              items={allSongs}
+              onAddToEp={handleAddSongToEp}
+              playState={playState}
+              onTogglePlay={togglePlay}
+              onSeek={seekTo}
+              itemNotes={songNotes}
+              onNotesChange={handleNotesChangeSong}
+              onAddCustomItem={handleAddCustomSong}
+              onDeleteItem={handleDeleteCustomSong}
+              onEditItem={handleEditSong}
+              onAttachAudio={handleAttachAudio}
+            />
+          )}
+
+          {activeView === 'builder' && (
+            <div className="space-y-4">
+              <button
+                onClick={() => setActiveView('tracker')}
+                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-violet-300 transition-colors"
+              >
+                <ArrowLeft size={14} /> Torna all'EP Tracker
+              </button>
+              <SongBuilder
+                track={selectedTrack}
+                beats={allBeats}
+                songs={allSongs}
+                onChangeTitle={(title) => updateSelectedTrack({ title })}
+                onChangeMood={(mood) => updateSelectedTrack({ mood })}
+                onChangeBeat={(beatId) => updateSelectedTrack({ beatId })}
+                onChangeSong={(songId) => updateSelectedTrack({ songId })}
+                onChangeLyrics={(lyrics) => updateSelectedTrack({ lyrics })}
+                onUpdateStructure={(structure) => updateSelectedTrack({ structure })}
+                playState={playState}
+                onTogglePlay={togglePlay}
+                onSeek={seekTo}
+                onAttachAudio={handleAttachAudio}
+                beatNotes={beatNotes}
+                onNotesChange={handleNotesChange}
+                songNotes={songNotes}
+                onNotesChangeSong={handleNotesChangeSong}
+              />
+            </div>
+          )}
+
+          {activeView === 'tracker' && (
+            <EPTracker
+              tracks={tracks}
+              beats={allBeats}
+              songs={allSongs}
+              onReorder={handleReorderTracks}
+              onOpenTrack={handleOpenTrack}
+              onDeleteTrack={handleDeleteTrack}
+              onAddTrack={handleAddBlankTrack}
+            />
+          )}
+
+          {activeView === 'export' && <ExportView epTitle={epTitle} tracks={tracks} beats={allBeats} songs={allSongs} />}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
