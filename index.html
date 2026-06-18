@@ -29,7 +29,7 @@ import ReactDOM from 'react-dom/client';
 import {
   LayoutDashboard, Library, Layers, ListMusic, Download, Music2, Play, Pause,
   Plus, Trash2, Copy, GripVertical, Pencil, Check, X, ChevronDown, Disc3,
-  Sparkles, Clock, FileJson, Printer, ArrowLeft, Upload, FolderUp, Mic2,
+  Sparkles, Clock, FileJson, Printer, ArrowLeft, Upload, Mic2,
   HardDrive, Link2Off, FileText, Cloud, RefreshCw, AlertTriangle
 } from 'lucide-react';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
@@ -51,7 +51,7 @@ import {
    index.html.
 
    COME AGGIUNGERE UN BEAT O UNA CANZONE:
-   1) Crea (se non esiste già) una cartella "beats" e/o "songs" nel tuo
+   1) Crea (se non esiste già) una cartella "beat" e/o "canzoni" nel tuo
       repository, accanto a index.html, e caricaci dentro il file mp3
       (es. tramite "Add file" > "Upload files" su GitHub).
    2) Aggiungi qui sotto una riga con i suoi dati, copiando lo schema
@@ -70,13 +70,16 @@ import {
    Esempio (rimuovi le // per attivarlo, dopo aver caricato il file):
    { id: 'beat1', name: 'Nome del beat', bpm: 140, key: 'C minor',
      duration: 178, genre: 'trap', mood: 'dark', tags: ['trap', 'dark'],
-     notes: '', audioUrl: 'beats/nome-del-beat.mp3' },
+     notes: '', audioUrl: 'beat/nome-del-beat.mp3' },
    ========================================================================= */
 
 const MOCK_BEATS = [
+  { id: 'beat1', name: 'Riflessi (prod. RaKo)', bpm: 140, key: 'F minor', duration: 178, genre: 'glo', mood: 'happy', tags: ['glo', 'happy'], notes: '', audioUrl: 'beat/Riflessi.mp3' },
+  { id: 'beat2', name: 'Anestesia Totale (prod. RaKo)', bpm: 100, key: 'G# minor', duration: 183, genre: 'trap', mood: 'sad', tags: ['trap', 'sad'], notes: '', audioUrl: 'beat/AnestesiaTotale.mp3' },
 ];
 
 const MOCK_SONGS = [
+  //{ id: 'canzone1', name: 'Esempio Canzone (placeholder)', bpm: 96, key: 'A minor', duration: 20, genre: 'pop', mood: 'chill', tags: ['placeholder'], notes: 'Questo è solo un file segnaposto (un tono) — sostituiscilo con una vera canzone caricando il tuo mp3 in canzoni/ e aggiornando audioUrl qui sotto.', audioUrl: 'canzoni/esempio-canzone.mp3' },
 ];
 
 const GENRE_COLORS = {
@@ -858,90 +861,6 @@ function Field({ label, value, onChange, placeholder, type = 'text' }) {
   );
 }
 
-function UploadMediaForm({ onAdd, onClose, kind = 'beat' }) {
-  const [file, setFile] = useState(null);
-  const [duration, setDuration] = useState(null);
-  const [name, setName] = useState('');
-  const [bpm, setBpm] = useState('');
-  const [key, setKey] = useState('');
-  const [genre, setGenre] = useState('custom');
-  const [mood, setMood] = useState('');
-  const [tags, setTags] = useState('');
-
-  const itemWord = kind === 'song' ? 'canzone' : 'beat';
-
-  const handleFile = (e) => {
-    const f = e.target.files[0];
-    if (!f) return;
-    setFile(f);
-    setDuration(null);
-    if (!name) setName(f.name.replace(/\.[^/.]+$/, ''));
-    const url = URL.createObjectURL(f);
-    const probe = new Audio();
-    probe.src = url;
-    probe.addEventListener('loadedmetadata', () => setDuration(Math.round(probe.duration)));
-  };
-
-  const handleSubmit = () => {
-    if (!file || !name.trim()) return;
-    const item = {
-      id: uid(),
-      name: name.trim(),
-      bpm: Number(bpm) || 0,
-      key: key.trim() || '—',
-      duration: duration || 0,
-      genre: genre.trim().toLowerCase() || 'custom',
-      mood: mood.trim().toLowerCase() || 'custom',
-      tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
-      notes: '',
-      audioUrl: URL.createObjectURL(file),
-      isCustom: true,
-    };
-    // pass the raw file too, so the caller can persist it in IndexedDB
-    onAdd(item, file);
-    onClose();
-  };
-
-  return (
-    <div className="rounded-xl border border-violet-500/40 bg-zinc-900/80 p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <h3 className="font-display font-semibold text-zinc-100 flex items-center gap-2">
-          <FolderUp size={16} className="text-violet-400" /> Carica una tua {itemWord}
-        </h3>
-        <button onClick={onClose} className="text-zinc-500 hover:text-zinc-200">
-          <X size={16} />
-        </button>
-      </div>
-
-      <label className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-zinc-700 hover:border-violet-500 rounded-lg p-6 cursor-pointer text-center transition-colors">
-        <Upload size={22} className="text-zinc-500" />
-        <span className="text-sm text-zinc-300">{file ? file.name : 'Scegli un file audio (mp3, wav, m4a...)'}</span>
-        {duration !== null && (
-          <span className="text-xs font-mono text-lime-400">Durata rilevata: {formatTime(duration)}</span>
-        )}
-        <input type="file" accept="audio/*" onChange={handleFile} className="hidden" />
-      </label>
-
-      <div className="grid sm:grid-cols-2 gap-3">
-        <Field label={kind === 'song' ? 'Nome canzone' : 'Nome beat'} value={name} onChange={setName} placeholder={kind === 'song' ? 'Es. La mia canzone' : 'Es. Il mio beat'} />
-        <Field label="BPM" value={bpm} onChange={setBpm} placeholder="Es. 140" type="number" />
-        <Field label="Tonalità" value={key} onChange={setKey} placeholder="Es. F minor" />
-        <Field label="Genere" value={genre} onChange={setGenre} placeholder="Es. trap" />
-        <Field label="Mood" value={mood} onChange={setMood} placeholder="Es. dark" />
-        <Field label="Tag (separati da virgola)" value={tags} onChange={setTags} placeholder="trap, dark, custom" />
-      </div>
-
-      <button
-        onClick={handleSubmit}
-        disabled={!file || !name.trim()}
-        className="flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 disabled:opacity-40 text-white text-sm font-medium px-4 py-2.5 transition-all"
-      >
-        <Plus size={15} /> Aggiungi alla libreria
-      </button>
-    </div>
-  );
-}
-
 /* =========================================================================
    EDIT BEAT / SONG METADATA
    ========================================================================= */
@@ -1012,11 +931,10 @@ function EditMediaForm({ item, onSave, onClose, kind = 'beat' }) {
    MEDIA LIBRARY (used for both Beats and Songs)
    ========================================================================= */
 
-function MediaLibrary({ items, onAddToEp, playState, onTogglePlay, onSeek, itemNotes, onNotesChange, onAddCustomItem, onDeleteItem, onEditItem, onAttachAudio, kind = 'beat' }) {
+function MediaLibrary({ items, onAddToEp, playState, onTogglePlay, onSeek, itemNotes, onNotesChange, onDeleteItem, onEditItem, onAttachAudio, kind = 'beat' }) {
   const [genre, setGenre] = useState('all');
   const [bpmRange, setBpmRange] = useState('all');
   const [mood, setMood] = useState('all');
-  const [uploadOpen, setUploadOpen] = useState(false);
 
   const isSong = kind === 'song';
   const itemWord = isSong ? 'canzone' : 'beat';
@@ -1036,27 +954,15 @@ function MediaLibrary({ items, onAddToEp, playState, onTogglePlay, onSeek, itemN
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="text-violet-400 text-xs font-mono uppercase tracking-widest mb-1">Catalogo</p>
-          <h2 className="font-display text-2xl font-bold text-zinc-100">{isSong ? 'Libreria Canzoni' : 'Libreria Beat'}</h2>
-          <p className="text-zinc-500 text-sm mt-1">
-            {isSong
-              ? 'Sfoglia, filtra e gestisci le tue canzoni: demo, idee e riferimenti per l\'EP.'
-              : 'Sfoglia, filtra e scegli i beat per costruire i tuoi brani.'}
-          </p>
-        </div>
-        {!uploadOpen && (
-          <button
-            onClick={() => setUploadOpen(true)}
-            className="flex items-center gap-2 rounded-lg border border-zinc-700 hover:border-violet-500 text-zinc-200 font-medium px-4 py-2 text-sm transition-colors shrink-0"
-          >
-            <FolderUp size={16} /> Carica una tua {itemWord}
-          </button>
-        )}
+      <div>
+        <p className="text-violet-400 text-xs font-mono uppercase tracking-widest mb-1">Catalogo</p>
+        <h2 className="font-display text-2xl font-bold text-zinc-100">{isSong ? 'Libreria Canzoni' : 'Libreria Beat'}</h2>
+        <p className="text-zinc-500 text-sm mt-1">
+          {isSong
+            ? 'Sfoglia, filtra e gestisci le canzoni: demo, idee e riferimenti per l\'EP.'
+            : 'Sfoglia, filtra e scegli i beat per costruire i tuoi brani.'}
+        </p>
       </div>
-
-      {uploadOpen && <UploadMediaForm kind={kind} onAdd={onAddCustomItem} onClose={() => setUploadOpen(false)} />}
 
       <div className="flex flex-wrap gap-3">
         <Select label="Genere" value={genre} onChange={setGenre} options={genres} />
@@ -1085,8 +991,8 @@ function MediaLibrary({ items, onAddToEp, playState, onTogglePlay, onSeek, itemN
           <div className="col-span-full rounded-xl border border-dashed border-zinc-800 p-8 text-center text-zinc-500">
             {items.length === 0
               ? (isSong
-                  ? "Nessuna canzone in libreria. Carica la tua prima canzone per iniziare."
-                  : "Nessun beat in libreria. Carica il tuo primo beat per iniziare.")
+                  ? "Nessuna canzone in libreria."
+                  : "Nessun beat in libreria.")
               : emptyMsg}
           </div>
         )}
@@ -1590,7 +1496,7 @@ function EPTracker({ tracks, beats, songs, onReorder, onOpenTrack, onDeleteTrack
                 </p>
               </div>
 
-              <StatusBadge complete={trackIsComplete(t)} />
+              <MediaStatusBadge status={trackMediaStatus(t)} />
 
               <button onClick={() => onOpenTrack(t.id)} className="p-2 rounded-md border border-zinc-700 hover:border-violet-400 hover:text-violet-300 text-zinc-400 transition-colors shrink-0">
                 <Pencil size={14} />
@@ -2047,42 +1953,6 @@ function App() {
   const handleNotesChange = (beatId, value) => setBeatNotes((prev) => ({ ...prev, [beatId]: value }));
   const handleNotesChangeSong = (songId, value) => setSongNotes((prev) => ({ ...prev, [songId]: value }));
 
-  // Show the new item immediately (optimistic), then push its audio to
-  // Firebase Storage if configured so every collaborator can hear it too.
-  const handleAddCustomBeat = async (beat, file) => {
-    setCustomBeats((prev) => [...prev, beat]);
-    if (!file) return;
-    if (cloudReady) {
-      try {
-        const url = await uploadAudioToCloud('beat', beat.id, file);
-        setCustomBeats((prev) => prev.map((b) => (b.id === beat.id ? { ...b, audioUrl: url } : b)));
-        return;
-      } catch (err) {
-        console.warn('Caricamento audio su Firebase non riuscito, resta solo locale:', err);
-      }
-    }
-    idbSet('audio', 'beat_' + beat.id, file).catch((err) =>
-      console.warn('Impossibile salvare il file audio del beat in locale:', err)
-    );
-  };
-
-  const handleAddCustomSong = async (song, file) => {
-    setCustomSongs((prev) => [...prev, song]);
-    if (!file) return;
-    if (cloudReady) {
-      try {
-        const url = await uploadAudioToCloud('song', song.id, file);
-        setCustomSongs((prev) => prev.map((s) => (s.id === song.id ? { ...s, audioUrl: url } : s)));
-        return;
-      } catch (err) {
-        console.warn('Caricamento audio su Firebase non riuscito, resta solo locale:', err);
-      }
-    }
-    idbSet('audio', 'song_' + song.id, file).catch((err) =>
-      console.warn('Impossibile salvare il file audio della canzone in locale:', err)
-    );
-  };
-
   const handleEditBeat = (beatId, patch) => {
     if (MOCK_BEATS.some((b) => b.id === beatId)) {
       setBeatOverrides((prev) => ({ ...prev, [beatId]: { ...prev[beatId], ...patch } }));
@@ -2287,7 +2157,6 @@ function App() {
               onSeek={seekTo}
               itemNotes={beatNotes}
               onNotesChange={handleNotesChange}
-              onAddCustomItem={handleAddCustomBeat}
               onDeleteItem={handleDeleteCustomBeat}
               onEditItem={handleEditBeat}
               onAttachAudio={handleAttachAudio}
@@ -2304,7 +2173,6 @@ function App() {
               onSeek={seekTo}
               itemNotes={songNotes}
               onNotesChange={handleNotesChangeSong}
-              onAddCustomItem={handleAddCustomSong}
               onDeleteItem={handleDeleteCustomSong}
               onEditItem={handleEditSong}
               onAttachAudio={handleAttachAudio}
