@@ -76,6 +76,8 @@ import {
 const MOCK_BEATS = [
   { id: 'beat1', name: 'Riflessi (prod. RaKo)', bpm: 140, key: 'F minor', duration: 178, genre: 'glo', mood: 'happy', tags: ['glo', 'happy'], notes: '', audioUrl: 'beat/Riflessi.mp3' },
   { id: 'beat2', name: 'Anestesia Totale (prod. RaKo)', bpm: 100, key: 'G# minor', duration: 183, genre: 'trap', mood: 'sad', tags: ['trap', 'sad'], notes: '', audioUrl: 'beat/AnestesiaTotale.mp3' },
+  { id: 'beat2', name: 'TIK TAK (prod. Claudio)', bpm: 0, key: '?', duration: 226, genre: 'trap', mood: 'dark', tags: ['trap', 'dark'], notes: '', audioUrl: 'beat/TAMMO_PENSÉE.mp3' },
+  { id: 'beat2', name: 'Rooftop (prod. Claudio)', bpm: 0, key: '?', duration: 226, genre: 'trap', mood: 'hard', tags: ['trap', 'hard'], notes: '', audioUrl: 'beat/Rooftop.mp3' },
 ];
 
 const MOCK_SONGS = [
@@ -88,6 +90,7 @@ const GENRE_COLORS = {
   'lo-fi': 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40',
   pop: 'bg-lime-400/20 text-lime-300 border-lime-400/40',
   'r&b': 'bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/40',
+  glo: 'bg-orange-500/20 text-orange-300 border-orange-500/40',
   custom: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
 };
 
@@ -161,8 +164,10 @@ function trackTotalDuration(track) {
   return track.structure.reduce((sum, s) => sum + (Number(s.duration) || 0), 0);
 }
 
+// "Completato" significa avere sia il beat che la canzone collegati — usato
+// ovunque nell'app (Dashboard, EP Tracker, barra di avanzamento, Export).
 function trackIsComplete(track) {
-  return Boolean(track.beatId) && track.structure.length >= 4 && track.structure.every((s) => Number(s.duration) > 0);
+  return Boolean(track.beatId) && Boolean(track.songId);
 }
 
 // Three-state status used on the Dashboard: both beat+song linked, only beat, or nothing yet.
@@ -730,7 +735,7 @@ function TopBar({ epTitle, setEpTitle, progress, lastSaved, saveError, storageMo
    DASHBOARD
    ========================================================================= */
 
-function Dashboard({ epTitle, tracks, beats, songs, onAddTrack, onOpenTrack, onGoLibrary, playState, onTogglePlay }) {
+function Dashboard({ epTitle, tracks, beats, songs, onAddTrack, onOpenTrack, onGoLibrary, onGoSongLibrary, playState, onTogglePlay }) {
   const completed = tracks.filter(trackIsComplete).length;
   const total = tracks.length;
   const progress = total ? (completed / total) * 100 : 0;
@@ -771,6 +776,12 @@ function Dashboard({ epTitle, tracks, beats, songs, onAddTrack, onOpenTrack, onG
           className="flex items-center justify-center gap-2 rounded-lg border border-zinc-700 hover:border-violet-500 text-zinc-200 font-medium px-5 py-3 transition-colors"
         >
           <Library size={18} /> Esplora libreria beat
+        </button>
+        <button
+          onClick={onGoSongLibrary}
+          className="flex items-center justify-center gap-2 rounded-lg border border-zinc-700 hover:border-violet-500 text-zinc-200 font-medium px-5 py-3 transition-colors"
+        >
+          <Mic2 size={18} /> Esplora libreria canzoni
         </button>
       </div>
 
@@ -1186,7 +1197,7 @@ function ArrangementStrip({ track, onUpdateSection, onDuplicateSection, onDelete
   );
 }
 
-function SongBuilder({ track, beats, songs, onChangeTitle, onChangeMood, onChangeBeat, onChangeSong, onChangeLyrics, onUpdateStructure, onAddToEp, playState, onTogglePlay, onSeek, onAttachAudio, beatNotes, onNotesChange, songNotes, onNotesChangeSong }) {
+function SongBuilder({ track, allTracks, beats, songs, onChangeTitle, onChangeMood, onChangeBeat, onChangeSong, onChangeLyrics, onUpdateStructure, onAddToEp, playState, onTogglePlay, onSeek, onAttachAudio, beatNotes, onNotesChange, songNotes, onNotesChangeSong }) {
   const [pickerOpen, setPickerOpen] = useState(!track?.beatId);
   const [songPickerOpen, setSongPickerOpen] = useState(false);
 
@@ -1201,6 +1212,16 @@ function SongBuilder({ track, beats, songs, onChangeTitle, onChangeMood, onChang
 
   const beat = beats.find((b) => b.id === track.beatId);
   const song = songs.find((s) => s.id === track.songId);
+
+  // A beat already linked to ANOTHER track can't be picked here too — each
+  // beat belongs to at most one song.
+  const takenBeatIds = new Set(
+    (allTracks || [])
+      .filter((t) => t.id !== track.id && t.beatId)
+      .map((t) => t.beatId)
+  );
+  const selectableBeats = beats.filter((b) => !takenBeatIds.has(b.id));
+  const hiddenTakenCount = beats.length - selectableBeats.length;
 
   const updateSection = (idx, patch) => {
     const structure = track.structure.map((s, i) => (i === idx ? { ...s, ...patch } : s));
@@ -1272,21 +1293,35 @@ function SongBuilder({ track, beats, songs, onChangeTitle, onChangeMood, onChang
             </div>
           </div>
         ) : (
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {beats.map((b) => (
-              <BeatCard
-                key={b.id}
-                beat={b}
-                compact
-                onAddToEp={() => { onChangeBeat(b.id); setPickerOpen(false); }}
-                playState={playState}
-                onTogglePlay={onTogglePlay}
-                onSeek={onSeek}
-                onAttachAudio={onAttachAudio}
-                notesValue={beatNotes[b.id] ?? b.notes}
-                onNotesChange={onNotesChange}
-              />
-            ))}
+          <div className="space-y-3">
+            {hiddenTakenCount > 0 && (
+              <p className="text-xs text-zinc-500 flex items-center gap-1.5">
+                <Link2Off size={12} />
+                {hiddenTakenCount === 1
+                  ? '1 beat non è mostrato perché già assegnato a un altro brano.'
+                  : `${hiddenTakenCount} beat non sono mostrati perché già assegnati ad altri brani.`}
+              </p>
+            )}
+            {selectableBeats.length === 0 ? (
+              <p className="text-sm text-zinc-500">Nessun beat disponibile: sono tutti già assegnati ad altri brani.</p>
+            ) : (
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {selectableBeats.map((b) => (
+                  <BeatCard
+                    key={b.id}
+                    beat={b}
+                    compact
+                    onAddToEp={() => { onChangeBeat(b.id); setPickerOpen(false); }}
+                    playState={playState}
+                    onTogglePlay={onTogglePlay}
+                    onSeek={onSeek}
+                    onAttachAudio={onAttachAudio}
+                    notesValue={beatNotes[b.id] ?? b.notes}
+                    onNotesChange={onNotesChange}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -2142,6 +2177,7 @@ function App() {
               onAddTrack={handleAddBlankTrack}
               onOpenTrack={handleOpenTrack}
               onGoLibrary={() => setActiveView('library')}
+              onGoSongLibrary={() => setActiveView('songLibrary')}
               playState={playState}
               onTogglePlay={togglePlay}
             />
@@ -2189,6 +2225,7 @@ function App() {
               </button>
               <SongBuilder
                 track={selectedTrack}
+                allTracks={tracks}
                 beats={allBeats}
                 songs={allSongs}
                 onChangeTitle={(title) => updateSelectedTrack({ title })}
